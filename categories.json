@@ -1,0 +1,32 @@
+[
+  {
+    "category": "Network",
+    "glpiCategoryId": 12,
+    "keywords": ["vpn", "red", "conexion", "wifi", "internet"],
+    "defaultPriority": "high"
+  },
+  {
+    "category": "Email",
+    "glpiCategoryId": 21,
+    "keywords": ["correo", "email", "outlook", "imap", "smtp"],
+    "defaultPriority": "normal"
+  },
+  {
+    "category": "Hardware",
+    "glpiCategoryId": 33,
+    "keywords": ["impresora", "printer", "cpu", "monitor", "pc", "hardware"],
+    "defaultPriority": "normal"
+  },
+  {
+    "category": "Software",
+    "glpiCategoryId": 44,
+    "keywords": ["licencia", "software", "instalacion", "actualizacion", "app"],
+    "defaultPriority": "normal"
+  },
+  {
+    "category": "General",
+    "glpiCategoryId": 1,
+    "keywords": [],
+    "defaultPriority": "low"
+  }
+]

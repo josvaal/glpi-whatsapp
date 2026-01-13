@@ -1,0 +1,23 @@
+{
+  "name": "glpi-whatsapp",
+  "private": true,
+  "version": "1.0.0",
+  "type": "commonjs",
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/main.js",
+    "dev": "ts-node src/main.ts"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "qrcode-terminal": "^0.12.0",
+    "whatsapp-web.js": "^1.23.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.30",
+    "@types/qrcode-terminal": "^0.12.2",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.4.5"
+  }
+}
