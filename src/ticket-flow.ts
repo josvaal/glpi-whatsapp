@@ -13,6 +13,7 @@ type PendingSelection = {
   role: "solicitante" | "tecnico";
   candidates: GlpiUserCandidate[];
   pollMessageId: string | null;
+  awaitingPoll: boolean;
 };
 
 type TicketSession = {
@@ -293,6 +294,14 @@ export class TicketFlow {
     if (session.pendingSelection) {
       if (message.hasMedia) {
         await this.handleMedia(message, session);
+      }
+      if (session.pendingSelection.awaitingPoll) {
+        if (isEnd) {
+          await message.reply(
+            "Antes de finalizar, responde la encuesta para seleccionar el solicitante o tecnico."
+          );
+        }
+        return;
       }
       if (session.pendingSelection.pollMessageId) {
         if (isEnd) {
@@ -697,9 +706,18 @@ export class TicketFlow {
     role: "solicitante" | "tecnico",
     candidates: GlpiUserCandidate[]
   ): Promise<void> {
+    if (session.pendingSelection) {
+      return;
+    }
     const limited = candidates.slice(0, MAX_SELECTION_CANDIDATES);
     const roleLabel = role === "solicitante" ? "solicitante" : "tecnico";
     const optionNames = buildCandidateOptionNames(limited);
+    session.pendingSelection = {
+      role,
+      candidates: limited,
+      pollMessageId: null,
+      awaitingPoll: true,
+    };
     await tryReact(message, "🔎");
     const pollMessageId = message.sendPoll
       ? await message.sendPoll(
@@ -708,11 +726,8 @@ export class TicketFlow {
           false
         )
       : null;
-    session.pendingSelection = {
-      role,
-      candidates: limited,
-      pollMessageId: pollMessageId ?? null,
-    };
+    session.pendingSelection.pollMessageId = pollMessageId ?? null;
+    session.pendingSelection.awaitingPoll = false;
     if (pollMessageId) {
       return;
     }
