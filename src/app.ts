@@ -11,14 +11,26 @@ export async function run(): Promise<void> {
     technicianByPhone: config.technicianByPhone,
   });
 
-  startWhatsAppListener(config.whatsapp, async (message) => {
-    const mediaTag =
-      message.hasMedia && !message.body.startsWith("[media:")
-        ? ` [media:${message.mediaType || "desconocido"}]`
-        : "";
-    console.log(
-      `[${message.timestamp.toISOString()}] ${message.senderLabel}: ${message.body}${mediaTag}`
-    );
-    await flow.handleMessage(message);
-  });
+  startWhatsAppListener(
+    config.whatsapp,
+    async (message) => {
+      const mediaTag =
+        message.hasMedia && !message.body.startsWith("[media:")
+          ? ` [media:${message.mediaType || "desconocido"}]`
+          : "";
+      console.log(
+        `[${message.timestamp.toISOString()}] ${message.senderLabel}: ${message.body}${mediaTag}`
+      );
+      await flow.handleMessage(message);
+    },
+    async (vote) => {
+      const selected = vote.selectedOptionNames.length > 0
+        ? vote.selectedOptionNames.join(", ")
+        : vote.selectedOptionIds.join(", ");
+      console.log(
+        `[${vote.timestamp.toISOString()}] ${vote.senderLabel}: [encuesta] ${selected}`
+      );
+      await flow.handlePollVote(vote);
+    }
+  );
 }

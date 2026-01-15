@@ -531,8 +531,27 @@ export class GlpiClient {
     if (results.length > 0) {
       return results;
     }
-    return this.searchUsersByCriteria(
+    results = await this.searchUsersByCriteria(
       [{ field: "34", value: trimmed }],
+      "0-50",
+      searchType
+    );
+    results = this.dedupeCandidates(results);
+    if (results.length > 0) {
+      return results;
+    }
+    results = await this.searchUsersByCriteria(
+      [{ field: "9", value: trimmed }],
+      "0-50",
+      searchType
+    );
+    results = this.dedupeCandidates(results);
+    if (results.length > 0) {
+      return results;
+    }
+    const loginFieldId = await this.getLoginFieldId();
+    return this.searchUsersByCriteria(
+      [{ field: loginFieldId, value: trimmed }],
       "0-50",
       searchType
     );

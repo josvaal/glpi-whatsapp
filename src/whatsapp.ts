@@ -1,15 +1,17 @@
 import qrcode from "qrcode-terminal";
-import { Client, LocalAuth } from "whatsapp-web.js";
-import type { Chat, Contact, Message } from "whatsapp-web.js";
+import { Client, LocalAuth, Poll } from "whatsapp-web.js";
+import type { Chat, Contact, Message, PollVote } from "whatsapp-web.js";
 
 import type { WhatsappConfig } from "./config";
-import type { IncomingMessage, MediaPayload } from "./types";
+import type { IncomingMessage, IncomingPollVote, MediaPayload } from "./types";
 
 export type MessageHandler = (message: IncomingMessage) => Promise<void>;
+export type PollVoteHandler = (vote: IncomingPollVote) => Promise<void>;
 
 export function startWhatsAppListener(
   config: WhatsappConfig,
-  handler: MessageHandler
+  handler: MessageHandler,
+  pollVoteHandler?: PollVoteHandler
 ): void {
   const puppeteerConfig: {
     headless: boolean;
@@ -36,8 +38,14 @@ export function startWhatsAppListener(
 
   let activeGroupId: string | null = null;
   let selfId: string | null = null;
+  let selfNumber: string | null = null;
   const seenMessageIds = new Set<string>();
-  const senderLabelCache = new Map<string, string>();
+  const ignoredMessageIds = new Set<string>();
+  const outgoingBodies = new Map<string, number>();
+  const senderInfoCache = new Map<
+    string,
+    { label: string; number: string | null }
+  >();
 
   async function findGroupByName(name: string): Promise<Chat | null> {
     const chats: Chat[] = await client.getChats();
@@ -48,6 +56,14 @@ export function startWhatsAppListener(
     return contact.pushname || contact.name || contact.number || "Desconocido";
   }
 
+  function normalizePhone(value: string | null | undefined): string | null {
+    if (!value) {
+      return null;
+    }
+    const digits = value.replace(/\D+/g, "");
+    return digits || null;
+  }
+
   function isLikelyMediaType(type: string | null | undefined): boolean {
     if (!type) {
       return false;
@@ -55,6 +71,36 @@ export function startWhatsAppListener(
     return ["image", "video", "audio", "ptt", "document", "sticker", "gif"].includes(
       type
     );
+  }
+
+  function delay(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  async function downloadMediaPayload(
+    message: Message,
+    attempts = 2,
+    delayMs = 750
+  ): Promise<MediaPayload | null> {
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      try {
+        const media = await message.downloadMedia();
+        if (media) {
+          return {
+            data: media.data,
+            mimetype: media.mimetype,
+            filename: media.filename || null,
+          };
+        }
+      } catch (err) {
+        const messageText = err instanceof Error ? err.message : String(err);
+        console.warn(`No se pudo descargar media: ${messageText}`);
+      }
+      if (attempt < attempts - 1) {
+        await delay(delayMs);
+      }
+    }
+    return null;
   }
 
   function getMessageKey(message: Message): string {
@@ -68,7 +114,39 @@ export function startWhatsAppListener(
     return `${from}_${to}_${timestamp}_${body}`;
   }
 
+  function rememberOutgoingBody(body: string): void {
+    const trimmed = body.trim();
+    if (!trimmed) {
+      return;
+    }
+    outgoingBodies.set(trimmed, Date.now() + 30_000);
+  }
+
+  function isOutgoingBody(body: string): boolean {
+    const trimmed = body.trim();
+    if (!trimmed) {
+      return false;
+    }
+    const expiresAt = outgoingBodies.get(trimmed);
+    if (!expiresAt) {
+      return false;
+    }
+    if (expiresAt <= Date.now()) {
+      outgoingBodies.delete(trimmed);
+      return false;
+    }
+    return true;
+  }
+
   function shouldProcessMessage(message: Message): boolean {
+    const serializedId = message.id?._serialized;
+    if (serializedId && ignoredMessageIds.has(serializedId)) {
+      ignoredMessageIds.delete(serializedId);
+      return false;
+    }
+    if (message.fromMe && isOutgoingBody(message.body || "")) {
+      return false;
+    }
     const key = getMessageKey(message);
     if (seenMessageIds.has(key)) {
       return false;
@@ -117,33 +195,52 @@ export function startWhatsAppListener(
     return senderId.endsWith("@g.us");
   }
 
-  async function getSenderLabel(senderId: string | null): Promise<string> {
+  async function getSenderInfo(
+    senderId: string | null,
+    fromMe: boolean
+  ): Promise<{ label: string; number: string | null }> {
     if (!senderId) {
-      return "Desconocido";
+      return { label: "Desconocido", number: null };
     }
     const normalizedId = normalizeContactId(senderId);
-    const cached = senderLabelCache.get(normalizedId);
+    const cached = senderInfoCache.get(normalizedId);
     if (cached) {
       return cached;
     }
     const number = extractNumber(normalizedId);
-    let label = number || normalizedId;
+    let resolvedNumber = normalizePhone(number) || number || null;
+    if (fromMe && selfNumber) {
+      resolvedNumber = selfNumber;
+    }
+    let label = resolvedNumber || normalizedId;
     if (isGroupId(normalizedId)) {
       label = "Sistema";
-      senderLabelCache.set(normalizedId, label);
-      return label;
+      const info = { label, number: null };
+      senderInfoCache.set(normalizedId, info);
+      return info;
     }
     try {
       const contact = await client.getContactById(normalizedId);
       const name = formatSender(contact);
-      if (name && name !== number) {
-        label = `${name} (${number})`;
+      const contactNumber =
+        normalizePhone(contact.number) || normalizePhone(contact.id?.user);
+      if (contactNumber) {
+        resolvedNumber = contactNumber;
+      }
+      if (name) {
+        label =
+          resolvedNumber && name !== resolvedNumber
+            ? `${name} (${resolvedNumber})`
+            : name;
+      } else if (resolvedNumber) {
+        label = resolvedNumber;
       }
     } catch {
       // ignore lookup failures and fall back to number
     }
-    senderLabelCache.set(normalizedId, label);
-    return label;
+    const info = { label, number: resolvedNumber };
+    senderInfoCache.set(normalizedId, info);
+    return info;
   }
 
   async function handleMessage(message: Message): Promise<void> {
@@ -159,7 +256,8 @@ export function startWhatsAppListener(
     }
 
     const senderId = getSenderIdFromMessage(message);
-    const senderLabel = await getSenderLabel(senderId);
+    const senderInfo = await getSenderInfo(senderId, message.fromMe);
+    const senderLabel = senderInfo.label;
     let body = message.body || "";
     const inferredHasMedia = message.hasMedia || isLikelyMediaType(message.type);
     if (!body) {
@@ -174,7 +272,7 @@ export function startWhatsAppListener(
     const timestamp = new Date(message.timestamp * 1000);
 
     try {
-      const senderNumber = senderId ? extractNumber(senderId) : null;
+      const senderNumber = senderInfo.number;
       const incoming: IncomingMessage = {
         body,
         timestamp,
@@ -188,19 +286,54 @@ export function startWhatsAppListener(
           if (!inferredHasMedia) {
             return null;
           }
-          const media = await message.downloadMedia();
-          if (!media) {
-            return null;
-          }
-          const payload: MediaPayload = {
-            data: media.data,
-            mimetype: media.mimetype,
-            filename: media.filename || null,
-          };
-          return payload;
+          return downloadMediaPayload(message);
         },
         reply: async (text: string) => {
-          await message.reply(text);
+          try {
+            rememberOutgoingBody(text);
+            const sent = await client.sendMessage(chatId, text, {
+              sendSeen: false,
+            });
+            const sentId = sent?.id?._serialized;
+            if (sentId) {
+              ignoredMessageIds.add(sentId);
+            }
+          } catch (err) {
+            const messageText = err instanceof Error ? err.message : String(err);
+            console.error(`No se pudo enviar respuesta: ${messageText}`);
+          }
+        },
+        react: async (emoji: string) => {
+          try {
+            await message.react(emoji);
+          } catch (err) {
+            const messageText = err instanceof Error ? err.message : String(err);
+            console.error(`No se pudo reaccionar al mensaje: ${messageText}`);
+          }
+        },
+        sendPoll: async (
+          title: string,
+          options: string[],
+          allowMultiple = false
+        ) => {
+          try {
+            const poll = new Poll(title, options, {
+              allowMultipleAnswers: allowMultiple,
+              messageSecret: undefined,
+            });
+            const sent = await client.sendMessage(chatId, poll, {
+              sendSeen: false,
+            });
+            const sentId = sent?.id?._serialized;
+            if (sentId) {
+              ignoredMessageIds.add(sentId);
+            }
+            return sentId ?? null;
+          } catch (err) {
+            const messageText = err instanceof Error ? err.message : String(err);
+            console.error(`No se pudo enviar encuesta: ${messageText}`);
+            return null;
+          }
         },
       };
       await handler(incoming);
@@ -208,6 +341,87 @@ export function startWhatsAppListener(
       const messageText = err instanceof Error ? err.message : String(err);
       console.error(`Error al procesar mensaje: ${messageText}`);
     }
+  }
+
+  async function handlePollVote(vote: PollVote): Promise<void> {
+    if (!pollVoteHandler || !activeGroupId) {
+      return;
+    }
+    const parentMessage = vote.parentMessage;
+    if (!parentMessage) {
+      return;
+    }
+    const chatId = getChatIdFromMessage(parentMessage);
+    if (!chatId || chatId !== activeGroupId) {
+      return;
+    }
+
+    const senderId = vote.voter || null;
+    const senderInfo = await getSenderInfo(senderId, senderId === selfId);
+    const selectedOptionIds = vote.selectedOptions
+      .map((option) => {
+        const localId = (option as { localId?: number }).localId;
+        return Number.isInteger(localId) ? localId : option.id;
+      })
+      .filter((value): value is number => Number.isInteger(value));
+    const selectedOptionNames = vote.selectedOptions
+      .map((option) => option.name)
+      .filter((name): name is string => Boolean(name));
+    if (selectedOptionIds.length === 0 && selectedOptionNames.length === 0) {
+      return;
+    }
+
+    const pollMessageId = parentMessage.id?._serialized || null;
+    const incomingVote: IncomingPollVote = {
+      chatId,
+      senderId,
+      senderNumber: senderInfo.number,
+      senderLabel: senderInfo.label,
+      pollMessageId,
+      selectedOptionIds,
+      selectedOptionNames,
+      timestamp: new Date(vote.interractedAtTs || Date.now()),
+      reply: async (text: string) => {
+        try {
+          rememberOutgoingBody(text);
+          const sent = await client.sendMessage(chatId, text, {
+            sendSeen: false,
+          });
+          const sentId = sent?.id?._serialized;
+          if (sentId) {
+            ignoredMessageIds.add(sentId);
+          }
+        } catch (err) {
+          const messageText = err instanceof Error ? err.message : String(err);
+          console.error(`No se pudo enviar respuesta: ${messageText}`);
+        }
+      },
+      sendPoll: async (
+        title: string,
+        options: string[],
+        allowMultiple = false
+      ) => {
+        try {
+          const poll = new Poll(title, options, {
+            allowMultipleAnswers: allowMultiple,
+            messageSecret: undefined,
+          });
+          const sent = await client.sendMessage(chatId, poll, {
+            sendSeen: false,
+          });
+          const sentId = sent?.id?._serialized;
+          if (sentId) {
+            ignoredMessageIds.add(sentId);
+          }
+          return sentId ?? null;
+        } catch (err) {
+          const messageText = err instanceof Error ? err.message : String(err);
+          console.error(`No se pudo enviar encuesta: ${messageText}`);
+          return null;
+        }
+      },
+    };
+    await pollVoteHandler(incomingVote);
   }
 
   client.on("qr", (qr: string) => {
@@ -234,6 +448,7 @@ export function startWhatsAppListener(
       }
       activeGroupId = group.id._serialized;
       selfId = client.info?.wid?._serialized ?? null;
+      selfNumber = normalizePhone(client.info?.wid?.user ?? null);
       console.log(`Escuchando mensajes entrantes del grupo: ${group.name}`);
     } catch (err) {
       const messageText = err instanceof Error ? err.message : String(err);
@@ -243,12 +458,24 @@ export function startWhatsAppListener(
   });
 
   client.on("message", (message: Message) => {
+    if (message.fromMe) {
+      return;
+    }
     void handleMessage(message);
   });
 
   client.on("message_create", (message: Message) => {
+    if (!message.fromMe) {
+      return;
+    }
     void handleMessage(message);
   });
+
+  if (pollVoteHandler) {
+    client.on("vote_update", (vote: PollVote) => {
+      void handlePollVote(vote);
+    });
+  }
 
   client.on("disconnected", (reason: string) => {
     console.log(`Cliente desconectado: ${reason}`);

@@ -1,7 +1,19 @@
-import type { IncomingMessage, MediaPayload, TicketDraft } from "./types";
+import type {
+  GlpiUserCandidate,
+  IncomingMessage,
+  IncomingPollVote,
+  MediaPayload,
+  TicketDraft,
+} from "./types";
 import { normalizeText } from "./text";
 import { parseTicketText } from "./ticket-parser";
 import { GlpiClient } from "./glpi";
+
+type PendingSelection = {
+  role: "solicitante" | "tecnico";
+  candidates: GlpiUserCandidate[];
+  pollMessageId: string | null;
+};
 
 type TicketSession = {
   draft: TicketDraft | null;
@@ -9,11 +21,26 @@ type TicketSession = {
   attachments: MediaPayload[];
   awaitingText: boolean;
   uploadedCount: number;
+  resolvedRequesterId: string | null;
+  resolvedAssigneeId: string | null;
+  pendingSelection: PendingSelection | null;
 };
 
 type TicketFlowOptions = {
   defaultCategoryId: number;
   technicianByPhone: Record<string, string>;
+};
+
+type MessageContext = {
+  senderId: string | null;
+  senderNumber: string | null;
+  reply: (text: string) => Promise<void>;
+  sendPoll?: (
+    title: string,
+    options: string[],
+    allowMultiple?: boolean
+  ) => Promise<string | null>;
+  react?: (emoji: string) => Promise<void>;
 };
 
 type CommandSpec = {
@@ -23,6 +50,7 @@ type CommandSpec = {
 
 const START_COMMANDS = buildCommandSpecs(["INICIAR TICKET", "OPEN TCK"]);
 const END_COMMANDS = buildCommandSpecs(["FINALIZAR TICKET", "CLOSE TCK"]);
+const MAX_SELECTION_CANDIDATES = 10;
 
 function buildCommandSpecs(commands: string[]): CommandSpec[] {
   return commands.map((command) => ({
@@ -58,6 +86,81 @@ function stripCommandBody(body: string, command: string): string {
   return body.replace(regex, "").trim();
 }
 
+function formatCandidateName(candidate: GlpiUserCandidate): string {
+  const first = candidate.firstname?.trim() || "";
+  const last = candidate.realname?.trim() || "";
+  const fullName = [first, last].filter(Boolean).join(" ").trim();
+  return fullName || candidate.login || candidate.id;
+}
+
+function buildCandidateLabel(candidate: GlpiUserCandidate): string {
+  const base = formatCandidateName(candidate);
+  if (candidate.login && candidate.login !== base) {
+    return `${base} (login: ${candidate.login})`;
+  }
+  return base;
+}
+
+function buildCandidateOptionNames(
+  candidates: GlpiUserCandidate[]
+): string[] {
+  const baseNames = candidates.map((candidate) => formatCandidateName(candidate));
+  const normalized = baseNames.map((name) => normalizeText(name));
+  const counts = new Map<string, number>();
+  for (const name of normalized) {
+    counts.set(name, (counts.get(name) ?? 0) + 1);
+  }
+  return candidates.map((candidate, index) => {
+    const base = baseNames[index];
+    if ((counts.get(normalized[index]) ?? 0) > 1) {
+      return buildCandidateLabel(candidate);
+    }
+    return base;
+  });
+}
+
+function buildCandidateMatchKeys(candidate: GlpiUserCandidate): string[] {
+  const first = candidate.firstname?.trim() || "";
+  const last = candidate.realname?.trim() || "";
+  const fullName = [first, last].filter(Boolean).join(" ").trim();
+  const reversed = [last, first].filter(Boolean).join(" ").trim();
+  const login = candidate.login?.trim() || "";
+  const keys = [fullName, reversed, login].filter(Boolean);
+  return Array.from(new Set(keys.map((value) => normalizeText(value))));
+}
+
+function matchCandidateInput(
+  input: string,
+  candidates: GlpiUserCandidate[]
+): GlpiUserCandidate | null {
+  const trimmed = input.trim();
+  if (!trimmed) {
+    return null;
+  }
+  const index = Number(trimmed);
+  if (Number.isInteger(index) && index >= 1 && index <= candidates.length) {
+    return candidates[index - 1];
+  }
+  const normalized = normalizeText(trimmed);
+  for (const candidate of candidates) {
+    const keys = buildCandidateMatchKeys(candidate);
+    if (keys.includes(normalized)) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+async function tryReact(
+  message: MessageContext,
+  emoji: string
+): Promise<void> {
+  if (!message.react) {
+    return;
+  }
+  await message.react(emoji);
+}
+
 function extractDni(value: string): string | null {
   const digits = value.replace(/\D/g, "");
   return digits.length === 8 ? digits : null;
@@ -77,8 +180,20 @@ function buildTicketContent(draft: TicketDraft): string {
 }
 
 function buildSessionKey(message: IncomingMessage): string {
-  const sender = message.senderNumber || message.senderId || "unknown";
-  return `${message.chatId}:${sender}`;
+  return buildSessionKeyFrom(
+    message.chatId,
+    message.senderNumber,
+    message.senderId
+  );
+}
+
+function buildSessionKeyFrom(
+  chatId: string,
+  senderNumber: string | null,
+  senderId: string | null
+): string {
+  const sender = senderNumber || senderId || "unknown";
+  return `${chatId}:${sender}`;
 }
 
 function deriveFilename(media: MediaPayload, fallbackBase: string): string {
@@ -146,8 +261,12 @@ export class TicketFlow {
         attachments: [],
         awaitingText: true,
         uploadedCount: 0,
+        resolvedRequesterId: null,
+        resolvedAssigneeId: null,
+        pendingSelection: null,
       };
       this.sessions.set(sessionKey, session);
+      await tryReact(message, "🟢");
       const startBody = startCommand
         ? stripCommandBody(message.body, startCommand.command)
         : "";
@@ -171,6 +290,46 @@ export class TicketFlow {
       return;
     }
 
+    if (session.pendingSelection) {
+      if (message.hasMedia) {
+        await this.handleMedia(message, session);
+      }
+      if (session.pendingSelection.pollMessageId) {
+        if (isEnd) {
+          await message.reply(
+            "Antes de finalizar, responde la encuesta para seleccionar el solicitante o tecnico."
+          );
+        }
+        return;
+      }
+      const selectionBody = endCommand
+        ? stripCommandBody(message.body, endCommand.command)
+        : message.body;
+      const resolved = await this.resolvePendingSelection(
+        message,
+        session,
+        selectionBody
+      );
+      if (!resolved) {
+        if (isEnd) {
+          await message.reply(
+            "Antes de finalizar, selecciona el solicitante o tecnico indicado."
+          );
+        }
+        return;
+      }
+      if (session.draft?.isComplete && !session.ticketId) {
+        const created = await this.tryCreateTicket(message, session);
+        if (created) {
+          await this.uploadPendingAttachments(session);
+        }
+      }
+      if (isEnd) {
+        await this.finalizeSession(message, sessionKey, session);
+      }
+      return;
+    }
+
     if (message.hasMedia) {
       await this.handleMedia(message, session);
       if (isEnd) {
@@ -187,6 +346,47 @@ export class TicketFlow {
     await this.handleText(message, session);
   }
 
+  async handlePollVote(vote: IncomingPollVote): Promise<void> {
+    const sessionKey = buildSessionKeyFrom(
+      vote.chatId,
+      vote.senderNumber,
+      vote.senderId
+    );
+    const session = this.sessions.get(sessionKey);
+    if (!session || !session.pendingSelection) {
+      return;
+    }
+    const pending = session.pendingSelection;
+    if (!pending.pollMessageId) {
+      return;
+    }
+    if (!vote.pollMessageId || pending.pollMessageId !== vote.pollMessageId) {
+      return;
+    }
+    const candidate = this.pickCandidateFromPollVote(pending, vote);
+    if (!candidate) {
+      const roleLabel =
+        pending.role === "solicitante" ? "solicitante" : "tecnico";
+      await vote.reply(
+        `No pude identificar al ${roleLabel}. Responde nuevamente la encuesta.`
+      );
+      return;
+    }
+    this.applyResolvedCandidate(session, pending.role, candidate);
+    session.pendingSelection = null;
+    const roleLabel =
+      pending.role === "solicitante" ? "Solicitante" : "Tecnico";
+    await vote.reply(
+      `${roleLabel} seleccionado: ${formatCandidateName(candidate)}.`
+    );
+    if (session.draft?.isComplete && !session.ticketId) {
+      const created = await this.tryCreateTicket(vote, session);
+      if (created) {
+        await this.uploadPendingAttachments(session);
+      }
+    }
+  }
+
   private async handleText(
     message: IncomingMessage,
     session: TicketSession,
@@ -195,11 +395,19 @@ export class TicketFlow {
     const parsed = parseTicketText(bodyOverride ?? message.body);
     if (!parsed) {
       if (session.awaitingText) {
+        await tryReact(message, "⚠️");
         await message.reply(
           "No pude reconocer el formato. Usa SOLICITANTE, ASIGNADO y PROBLEMA, o el formato 'solicitante - tecnico => problema'."
         );
       }
       return;
+    }
+
+    if (parsed.solicitante && parsed.solicitante !== session.draft?.solicitante) {
+      session.resolvedRequesterId = null;
+    }
+    if (parsed.asignado && parsed.asignado !== session.draft?.asignado) {
+      session.resolvedAssigneeId = null;
     }
 
     session.draft = {
@@ -215,6 +423,7 @@ export class TicketFlow {
     session.awaitingText = false;
 
     if (!session.draft.isComplete) {
+      await tryReact(message, "⚠️");
       await message.reply(
         "Faltan datos. Necesito al menos SOLICITANTE y PROBLEMA."
       );
@@ -235,12 +444,14 @@ export class TicketFlow {
   ): Promise<void> {
     const media = await message.getMedia();
     if (!media) {
+      await tryReact(message, "❌");
       await message.reply("No pude descargar el archivo adjunto.");
       return;
     }
 
     if (!session.ticketId) {
       session.attachments.push(media);
+      await tryReact(message, "📎");
       if (session.awaitingText) {
         await message.reply(
           "Archivo recibido. Envia primero los datos del ticket para poder adjuntarlo."
@@ -252,6 +463,9 @@ export class TicketFlow {
     const uploaded = await this.uploadAttachment(session.ticketId, media);
     if (uploaded) {
       session.uploadedCount += 1;
+      await tryReact(message, "📎");
+    } else {
+      await tryReact(message, "❌");
     }
   }
 
@@ -261,6 +475,7 @@ export class TicketFlow {
     session: TicketSession
   ): Promise<void> {
     if (!session.draft || !session.draft.isComplete) {
+      await tryReact(message, "⚠️");
       await message.reply(
         "No hay datos completos para crear el ticket. Envia SOLICITANTE y PROBLEMA."
       );
@@ -285,17 +500,19 @@ export class TicketFlow {
           }`
         : "Ticket finalizado."
     );
+    await tryReact(message, "✅");
     this.sessions.delete(sessionKey);
   }
 
   private async tryCreateTicket(
-    message: IncomingMessage,
+    message: MessageContext,
     session: TicketSession
   ): Promise<boolean> {
     if (!session.draft) {
       return false;
     }
     if (!this.glpi.isEnabled()) {
+      await tryReact(message, "❌");
       await message.reply("GLPI no esta configurado; ticket omitido.");
       return false;
     }
@@ -307,6 +524,7 @@ export class TicketFlow {
     const requesterValue = session.draft.solicitante || "";
     const requesterId = await this.resolveUserId(
       message,
+      session,
       requesterValue,
       "solicitante",
       true
@@ -321,6 +539,7 @@ export class TicketFlow {
     if (assigneeValue) {
       const resolvedAssignee = await this.resolveUserId(
         message,
+        session,
         assigneeValue,
         "tecnico",
         true
@@ -340,20 +559,23 @@ export class TicketFlow {
         assigneeId,
       });
       if (!ticketId) {
+        await tryReact(message, "❌");
         await message.reply("GLPI no devolvio ID de ticket.");
         return false;
       }
       session.ticketId = ticketId;
       await message.reply(`Ticket creado. ID: ${ticketId}`);
+      await tryReact(message, "🎫");
       return true;
     } catch (err) {
       const messageText = err instanceof Error ? err.message : String(err);
+      await tryReact(message, "❌");
       await message.reply(`Error al crear ticket: ${messageText}`);
       return false;
     }
   }
 
-  private resolveTechnicianFromSender(message: IncomingMessage): string | null {
+  private resolveTechnicianFromSender(message: MessageContext): string | null {
     if (!message.senderNumber) {
       return null;
     }
@@ -362,16 +584,26 @@ export class TicketFlow {
   }
 
   private async resolveUserId(
-    message: IncomingMessage,
+    message: MessageContext,
+    session: TicketSession,
     value: string,
     role: "solicitante" | "tecnico",
     allowName = false
   ): Promise<string | null> {
+    const cached =
+      role === "solicitante"
+        ? session.resolvedRequesterId
+        : session.resolvedAssigneeId;
+    if (cached) {
+      return cached;
+    }
+
     const trimmed = value.trim();
     if (!trimmed) {
       if (role === "solicitante") {
         const fallback = await this.glpi.resolveDefaultRequesterId();
         if (fallback) {
+          session.resolvedRequesterId = fallback;
           return fallback;
         }
         await message.reply("Falta SOLICITANTE.");
@@ -383,17 +615,13 @@ export class TicketFlow {
     if (dni) {
       try {
         const candidates = await this.glpi.findUsersByDni(dni);
-        if (candidates.length === 1) {
-          return candidates[0].id;
-        }
-        if (candidates.length === 0) {
-          await message.reply(`No se encontro ${role} con DNI ${dni}.`);
-        } else {
-          await message.reply(
-            `Hay mas de un ${role} con DNI ${dni}. Envia mas informacion.`
-          );
-        }
-        return null;
+        return await this.handleCandidateResults(
+          message,
+          session,
+          role,
+          candidates,
+          `No se encontro ${role} con DNI ${dni}.`
+        );
       } catch (err) {
         const messageText = err instanceof Error ? err.message : String(err);
         await message.reply(`Error al buscar DNI: ${messageText}`);
@@ -414,36 +642,156 @@ export class TicketFlow {
         await message.reply("Para el solicitante usa DNI o nombre y apellido.");
         return null;
       }
-      const candidates = await this.glpi.findUsersByName(trimmed, true);
-      if (candidates.length === 1) {
-        return candidates[0].id;
-      }
+      let candidates = await this.glpi.findUsersByName(trimmed, true);
       if (candidates.length === 0) {
-        await message.reply(
-          "No se encontro solicitante con ese nombre. Envia DNI."
-        );
-        return null;
+        candidates = await this.glpi.findUsersByName(trimmed, false);
       }
-      await message.reply(
-        "Hay varios solicitantes con ese nombre. Envia DNI para identificarlo."
+      return await this.handleCandidateResults(
+        message,
+        session,
+        role,
+        candidates,
+        "No se encontro solicitante con ese nombre. Envia DNI."
       );
-      return null;
     }
 
     const strict = tokens.length >= 2;
-    const candidates = await this.glpi.findUsersByName(trimmed, strict);
-    if (candidates.length === 1) {
-      return candidates[0].id;
+    let candidates = await this.glpi.findUsersByName(trimmed, strict);
+    if (candidates.length === 0 && strict) {
+      candidates = await this.glpi.findUsersByName(trimmed, false);
     }
+    return await this.handleCandidateResults(
+      message,
+      session,
+      role,
+      candidates,
+      `No se encontro ${role} con nombre '${trimmed}'. Envia DNI.`
+    );
+  }
+
+  private async handleCandidateResults(
+    message: MessageContext,
+    session: TicketSession,
+    role: "solicitante" | "tecnico",
+    candidates: GlpiUserCandidate[],
+    notFoundMessage: string
+  ): Promise<string | null> {
     if (candidates.length === 0) {
-      await message.reply(
-        `No se encontro ${role} con nombre '${trimmed}'. Envia DNI.`
-      );
+      await tryReact(message, "❌");
+      await message.reply(notFoundMessage);
       return null;
     }
-    await message.reply(
-      `Hay varios ${role} con ese nombre. Envia DNI para identificarlo.`
+
+    if (candidates.length === 1) {
+      this.applyResolvedCandidate(session, role, candidates[0]);
+      return candidates[0].id;
+    }
+
+    await this.promptCandidateSelection(message, session, role, candidates);
+    return null;
+  }
+
+  private async promptCandidateSelection(
+    message: MessageContext,
+    session: TicketSession,
+    role: "solicitante" | "tecnico",
+    candidates: GlpiUserCandidate[]
+  ): Promise<void> {
+    const limited = candidates.slice(0, MAX_SELECTION_CANDIDATES);
+    const roleLabel = role === "solicitante" ? "solicitante" : "tecnico";
+    const optionNames = buildCandidateOptionNames(limited);
+    await tryReact(message, "🔎");
+    const pollMessageId = message.sendPoll
+      ? await message.sendPoll(
+          `Selecciona ${roleLabel} del ticket`,
+          optionNames,
+          false
+        )
+      : null;
+    session.pendingSelection = {
+      role,
+      candidates: limited,
+      pollMessageId: pollMessageId ?? null,
+    };
+    if (pollMessageId) {
+      return;
+    }
+    const lines = limited.map(
+      (candidate, index) => `${index + 1}) ${buildCandidateLabel(candidate)}`
     );
+    const suffix =
+      candidates.length > limited.length
+        ? `\n(Mostrando ${limited.length} de ${candidates.length}. Si no esta en la lista, envia el DNI o un nombre mas especifico.)`
+        : "";
+    await message.reply(
+      `No pude enviar la encuesta. Responde con el nombre completo o el numero de la lista:\n${lines.join(
+        "\n"
+      )}${suffix}`
+    );
+  }
+
+  private async resolvePendingSelection(
+    message: IncomingMessage,
+    session: TicketSession,
+    selectionBody: string
+  ): Promise<boolean> {
+    const pending = session.pendingSelection;
+    if (!pending) {
+      return false;
+    }
+    const input = selectionBody.trim();
+    if (!input) {
+      return false;
+    }
+    const candidate = matchCandidateInput(input, pending.candidates);
+    if (!candidate) {
+      const roleLabel = pending.role === "solicitante" ? "solicitante" : "tecnico";
+      await tryReact(message, "⚠️");
+      await message.reply(
+        `No pude identificar al ${roleLabel}. Responde con el nombre completo exacto o el numero de la lista.`
+      );
+      return false;
+    }
+    this.applyResolvedCandidate(session, pending.role, candidate);
+    session.pendingSelection = null;
+    const roleLabel = pending.role === "solicitante" ? "Solicitante" : "Tecnico";
+    await message.reply(`${roleLabel} seleccionado: ${formatCandidateName(candidate)}.`);
+    await tryReact(message, "✅");
+    return true;
+  }
+
+  private applyResolvedCandidate(
+    session: TicketSession,
+    role: "solicitante" | "tecnico",
+    candidate: GlpiUserCandidate
+  ): void {
+    const name = formatCandidateName(candidate);
+    if (role === "solicitante") {
+      session.resolvedRequesterId = candidate.id;
+      if (session.draft) {
+        session.draft.solicitante = name;
+      }
+      return;
+    }
+    session.resolvedAssigneeId = candidate.id;
+    if (session.draft) {
+      session.draft.asignado = name;
+    }
+  }
+
+  private pickCandidateFromPollVote(
+    pending: PendingSelection,
+    vote: IncomingPollVote
+  ): GlpiUserCandidate | null {
+    if (vote.selectedOptionIds.length > 0) {
+      const index = vote.selectedOptionIds[0];
+      if (Number.isInteger(index) && index >= 0 && index < pending.candidates.length) {
+        return pending.candidates[index];
+      }
+    }
+    if (vote.selectedOptionNames.length > 0) {
+      return matchCandidateInput(vote.selectedOptionNames[0], pending.candidates);
+    }
     return null;
   }
 

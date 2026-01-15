@@ -24,6 +24,29 @@ export type IncomingMessage = {
   mediaType: string | null;
   getMedia: () => Promise<MediaPayload | null>;
   reply: (text: string) => Promise<void>;
+  react: (emoji: string) => Promise<void>;
+  sendPoll: (
+    title: string,
+    options: string[],
+    allowMultiple?: boolean
+  ) => Promise<string | null>;
+};
+
+export type IncomingPollVote = {
+  chatId: string;
+  senderId: string | null;
+  senderNumber: string | null;
+  senderLabel: string;
+  pollMessageId: string | null;
+  selectedOptionIds: number[];
+  selectedOptionNames: string[];
+  timestamp: Date;
+  reply: (text: string) => Promise<void>;
+  sendPoll: (
+    title: string,
+    options: string[],
+    allowMultiple?: boolean
+  ) => Promise<string | null>;
 };
 
 export type MediaPayload = {

@@ -51,6 +51,33 @@ function normalizeGlpiBaseUrl(value: string | undefined): string | null {
   return base;
 }
 
+function normalizePhone(value: string): string {
+  return value.replace(/\D+/g, "");
+}
+
+function normalizeTechnicianMap(
+  map: Record<string, string>
+): Record<string, string> {
+  const normalized: Record<string, string> = {};
+  for (const [key, value] of Object.entries(map)) {
+    const keyText = String(key ?? "").trim();
+    const valueText = String(value ?? "").trim();
+    if (!keyText || !valueText) {
+      continue;
+    }
+    const keyDigits = normalizePhone(keyText);
+    const valueDigits = normalizePhone(valueText);
+    if (keyDigits.length >= 8) {
+      normalized[keyDigits] = valueText;
+    } else if (valueDigits.length >= 8) {
+      normalized[valueDigits] = keyText;
+    } else {
+      normalized[keyText] = valueText;
+    }
+  }
+  return normalized;
+}
+
 export function loadConfig(): AppConfig {
   const groupName = (process.env.WHATSAPP_GROUP_NAME || "").trim();
   if (!groupName) {
@@ -92,18 +119,26 @@ export function loadConfig(): AppConfig {
 
   let technicianByPhone: Record<string, string> = {};
   const techniciansRaw = (process.env.TECHNICIAN_BY_PHONE || "").trim();
-  const techniciansPath = (process.env.TECHNICIAN_BY_PHONE_PATH || "").trim();
+  let techniciansPath = (process.env.TECHNICIAN_BY_PHONE_PATH || "").trim();
+  const defaultNumbersMapPath = path.join(
+    process.cwd(),
+    "numbers-map.json"
+  );
+  if (!techniciansPath && !techniciansRaw && fs.existsSync(defaultNumbersMapPath)) {
+    techniciansPath = defaultNumbersMapPath;
+  }
   if (techniciansRaw) {
     try {
       const parsed = JSON.parse(techniciansRaw) as Record<string, string>;
-      technicianByPhone = parsed || {};
+      technicianByPhone = normalizeTechnicianMap(parsed || {});
     } catch (err) {
       console.warn("TECHNICIAN_BY_PHONE no es un JSON valido.");
     }
   } else if (techniciansPath && fs.existsSync(techniciansPath)) {
     try {
       const raw = fs.readFileSync(techniciansPath, "utf-8");
-      technicianByPhone = JSON.parse(raw) as Record<string, string>;
+      const parsed = JSON.parse(raw) as Record<string, string>;
+      technicianByPhone = normalizeTechnicianMap(parsed || {});
     } catch (err) {
       console.warn("No se pudo leer TECHNICIAN_BY_PHONE_PATH.");
     }
