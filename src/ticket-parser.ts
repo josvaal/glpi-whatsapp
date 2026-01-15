@@ -21,6 +21,11 @@ function splitByDash(value: string): string[] {
     .filter((part) => part.length > 0);
 }
 
+function looksLikeDni(value: string): boolean {
+  const digits = value.replace(/\D/g, "");
+  return digits.length === 8;
+}
+
 function buildDraft(
   solicitante?: string,
   asignado?: string,
@@ -100,6 +105,41 @@ export function parseInlineTemplate(body: string): TicketDraft | null {
   return buildDraft(solicitante, asignado, problema, body);
 }
 
+export function parseLooseDashTemplate(body: string): TicketDraft | null {
+  if (body.includes("=>")) {
+    return null;
+  }
+  const parts = splitByDash(body);
+  if (parts.length !== 2) {
+    return null;
+  }
+  const [first, second] = parts;
+  if (!first || !second) {
+    return null;
+  }
+
+  const firstDni = looksLikeDni(first);
+  const secondDni = looksLikeDni(second);
+
+  if (firstDni && !secondDni) {
+    return buildDraft(first, undefined, second, body);
+  }
+  if (secondDni && !firstDni) {
+    return buildDraft(second, undefined, first, body);
+  }
+
+  const firstLen = first.length;
+  const secondLen = second.length;
+  if (firstLen >= secondLen) {
+    return buildDraft(second, undefined, first, body);
+  }
+  return buildDraft(first, undefined, second, body);
+}
+
 export function parseTicketText(body: string): TicketDraft | null {
-  return parseKeyValueTemplate(body) ?? parseInlineTemplate(body);
+  return (
+    parseKeyValueTemplate(body) ??
+    parseInlineTemplate(body) ??
+    parseLooseDashTemplate(body)
+  );
 }

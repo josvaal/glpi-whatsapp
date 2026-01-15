@@ -12,8 +12,12 @@ export async function run(): Promise<void> {
   });
 
   startWhatsAppListener(config.whatsapp, async (message) => {
+    const mediaTag =
+      message.hasMedia && !message.body.startsWith("[media:")
+        ? ` [media:${message.mediaType || "desconocido"}]`
+        : "";
     console.log(
-      `[${message.timestamp.toISOString()}] ${message.senderLabel}: ${message.body}`
+      `[${message.timestamp.toISOString()}] ${message.senderLabel}: ${message.body}${mediaTag}`
     );
     await flow.handleMessage(message);
   });

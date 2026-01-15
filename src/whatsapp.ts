@@ -48,6 +48,15 @@ export function startWhatsAppListener(
     return contact.pushname || contact.name || contact.number || "Desconocido";
   }
 
+  function isLikelyMediaType(type: string | null | undefined): boolean {
+    if (!type) {
+      return false;
+    }
+    return ["image", "video", "audio", "ptt", "document", "sticker", "gif"].includes(
+      type
+    );
+  }
+
   function getMessageKey(message: Message): string {
     if (message.id && message.id._serialized) {
       return message.id._serialized;
@@ -152,8 +161,9 @@ export function startWhatsAppListener(
     const senderId = getSenderIdFromMessage(message);
     const senderLabel = await getSenderLabel(senderId);
     let body = message.body || "";
+    const inferredHasMedia = message.hasMedia || isLikelyMediaType(message.type);
     if (!body) {
-      if (message.hasMedia) {
+      if (inferredHasMedia) {
         body = `[media:${message.type}]`;
       } else if (message.type) {
         body = `[${message.type}]`;
@@ -172,10 +182,10 @@ export function startWhatsAppListener(
         senderId,
         senderNumber,
         chatId,
-        hasMedia: message.hasMedia,
+        hasMedia: inferredHasMedia,
         mediaType: message.type || null,
         getMedia: async () => {
-          if (!message.hasMedia) {
+          if (!inferredHasMedia) {
             return null;
           }
           const media = await message.downloadMedia();

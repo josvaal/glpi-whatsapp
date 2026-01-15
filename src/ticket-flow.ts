@@ -16,8 +16,47 @@ type TicketFlowOptions = {
   technicianByPhone: Record<string, string>;
 };
 
-const START_COMMAND = "INICIAR TICKET";
-const END_COMMAND = "FINALIZAR TICKET";
+type CommandSpec = {
+  command: string;
+  normalized: string;
+};
+
+const START_COMMANDS = buildCommandSpecs(["INICIAR TICKET", "OPEN TCK"]);
+const END_COMMANDS = buildCommandSpecs(["FINALIZAR TICKET", "CLOSE TCK"]);
+
+function buildCommandSpecs(commands: string[]): CommandSpec[] {
+  return commands.map((command) => ({
+    command,
+    normalized: normalizeText(command),
+  }));
+}
+
+function matchCommand(
+  normalizedBody: string,
+  commands: CommandSpec[]
+): CommandSpec | null {
+  for (const command of commands) {
+    if (normalizedBody.startsWith(command.normalized)) {
+      return command;
+    }
+  }
+  return null;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function buildCommandRegex(command: string): RegExp {
+  const tokens = command.trim().split(/\s+/).map(escapeRegExp);
+  const pattern = tokens.join("\\s+");
+  return new RegExp(`^\\s*${pattern}\\s*[:\\-]?\\s*`, "i");
+}
+
+function stripCommandBody(body: string, command: string): string {
+  const regex = buildCommandRegex(command);
+  return body.replace(regex, "").trim();
+}
 
 function extractDni(value: string): string | null {
   const digits = value.replace(/\D/g, "");
@@ -95,8 +134,10 @@ export class TicketFlow {
     const normalized = normalizeText(message.body);
     const sessionKey = buildSessionKey(message);
     let session = this.sessions.get(sessionKey);
-    const isStart = normalized.startsWith(START_COMMAND);
-    const isEnd = normalized.startsWith(END_COMMAND);
+    const startCommand = matchCommand(normalized, START_COMMANDS);
+    const endCommand = matchCommand(normalized, END_COMMANDS);
+    const isStart = Boolean(startCommand);
+    const isEnd = Boolean(endCommand);
 
     if (isStart) {
       session = {
@@ -107,9 +148,16 @@ export class TicketFlow {
         uploadedCount: 0,
       };
       this.sessions.set(sessionKey, session);
-      await message.reply(
-        "Ticket iniciado. Envia los datos (por ejemplo: SOLICITANTE: 73872028, ASIGNADO: 12345678, PROBLEMA: ...). Luego envia los archivos y termina con FINALIZAR TICKET."
-      );
+      const startBody = startCommand
+        ? stripCommandBody(message.body, startCommand.command)
+        : "";
+      if (!startBody) {
+        await message.reply(
+          "Ticket iniciado. Envia los datos (por ejemplo: SOLICITANTE: 73872028, ASIGNADO: 12345678, PROBLEMA: ...). Luego envia los archivos y termina con FINALIZAR TICKET o CLOSE TCK."
+        );
+      } else {
+        await this.handleText(message, session, startBody);
+      }
       if (message.hasMedia) {
         await this.handleMedia(message, session);
       }
@@ -141,9 +189,10 @@ export class TicketFlow {
 
   private async handleText(
     message: IncomingMessage,
-    session: TicketSession
+    session: TicketSession,
+    bodyOverride?: string
   ): Promise<void> {
-    const parsed = parseTicketText(message.body);
+    const parsed = parseTicketText(bodyOverride ?? message.body);
     if (!parsed) {
       if (session.awaitingText) {
         await message.reply(
