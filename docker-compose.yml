@@ -1,0 +1,17 @@
+services:
+  glpi-whatsapp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - .env
+    environment:
+      WHATSAPP_SESSION_DIR: /app/.wa_session
+    volumes:
+      - whatsapp-session:/app/.wa_session
+      - whatsapp-cache:/app/.wwebjs_cache
+    restart: unless-stopped
+
+volumes:
+  whatsapp-session:
+  whatsapp-cache:
