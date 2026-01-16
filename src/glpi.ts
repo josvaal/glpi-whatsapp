@@ -7,6 +7,13 @@ type GlpiRequestOptions = {
   body?: unknown;
 };
 
+type GlpiSearchCriterion = {
+  field: string;
+  value: string;
+  link?: string;
+  searchType?: string;
+};
+
 type NameSplit = {
   realname: string;
   firstname: string;
@@ -38,7 +45,9 @@ export class GlpiClient {
   private defaultRequesterId: string | null = null;
   private detectedDniFieldIds: string[] | null = null;
   private detectedLoginFieldId: string | null = null;
+  private detectedEntityFieldId: string | null | undefined = undefined;
   private searchOptionsCache: Record<string, unknown> | null = null;
+  private readonly userEntityId = "26";
 
   constructor(config: GlpiConfig) {
     this.baseUrl = config.baseUrl;
@@ -264,17 +273,44 @@ export class GlpiClient {
   }
 
   private async searchUsersByCriteria(
-    criteria: Array<{ field: string; value: string; link?: string }>,
+    criteria: GlpiSearchCriterion[],
     range = "0-50",
     searchType = "contains"
   ): Promise<GlpiUserCandidate[]> {
+    const entityFieldId = this.userEntityId
+      ? await this.getUserEntityFieldId()
+      : null;
+    let criteriaWithEntity = criteria;
+    if (entityFieldId && this.userEntityId) {
+      const normalizedEntity = this.userEntityId.trim();
+      if (normalizedEntity) {
+        const rest = criteria.map((item) => {
+          if (item.link) {
+            return item;
+          }
+          return { ...item, link: "AND" };
+        });
+        criteriaWithEntity = [
+          {
+            field: entityFieldId,
+            value: normalizedEntity,
+            searchType: "equals",
+          },
+          ...rest,
+        ];
+      }
+    }
+
     const params: Array<[string, string]> = [];
-    criteria.forEach((item, index) => {
+    criteriaWithEntity.forEach((item, index) => {
       if (item.link) {
         params.push([`criteria[${index}][link]`, item.link]);
       }
       params.push([`criteria[${index}][field]`, item.field]);
-      params.push([`criteria[${index}][searchtype]`, searchType]);
+      params.push([
+        `criteria[${index}][searchtype]`,
+        item.searchType ?? searchType,
+      ]);
       params.push([`criteria[${index}][value]`, item.value]);
     });
     params.push(["forcedisplay[0]", "2"]);
@@ -323,6 +359,115 @@ export class GlpiClient {
       seen.add(key);
       return true;
     });
+  }
+
+  private tokenizeName(value: string): string[] {
+    return value
+      .split(/\s+/)
+      .map((part) => part.trim())
+      .filter(Boolean);
+  }
+
+  private buildNameSearchAttempts(
+    value: string,
+    searchType: string
+  ): GlpiSearchCriterion[][] {
+    const attempts: GlpiSearchCriterion[][] = [];
+    const seen = new Set<string>();
+    const addAttempt = (criteria: GlpiSearchCriterion[]): void => {
+      const key = criteria
+        .map(
+          (item) =>
+            `${item.field}:${normalizeText(item.value)}:${
+              item.link ?? ""
+            }:${item.searchType ?? searchType}`
+        )
+        .join("|");
+      if (seen.has(key)) {
+        return;
+      }
+      seen.add(key);
+      attempts.push(criteria);
+    };
+
+    const tokens = this.tokenizeName(value);
+    if (tokens.length < 2) {
+      return attempts;
+    }
+
+    for (let i = 1; i < tokens.length; i += 1) {
+      const first = tokens.slice(0, i).join(" ");
+      const last = tokens.slice(i).join(" ");
+      addAttempt([
+        { field: "9", value: first },
+        { field: "34", value: last, link: "AND" },
+      ]);
+      addAttempt([
+        { field: "9", value: last },
+        { field: "34", value: first, link: "AND" },
+      ]);
+    }
+
+    if (tokens.length <= 6) {
+      const total = 1 << tokens.length;
+      for (let mask = 1; mask < total - 1; mask += 1) {
+        const firstTokens: string[] = [];
+        const lastTokens: string[] = [];
+        for (let i = 0; i < tokens.length; i += 1) {
+          if (mask & (1 << i)) {
+            firstTokens.push(tokens[i]);
+          } else {
+            lastTokens.push(tokens[i]);
+          }
+        }
+        if (firstTokens.length === 0 || lastTokens.length === 0) {
+          continue;
+        }
+        addAttempt([
+          { field: "9", value: firstTokens.join(" ") },
+          { field: "34", value: lastTokens.join(" "), link: "AND" },
+        ]);
+      }
+    }
+
+    return attempts;
+  }
+
+  private buildSingleFieldNameAttempts(
+    value: string,
+    searchType: string
+  ): GlpiSearchCriterion[][] {
+    const attempts: GlpiSearchCriterion[][] = [];
+    const seen = new Set<string>();
+    const addAttempt = (criteria: GlpiSearchCriterion[]): void => {
+      const key = criteria
+        .map(
+          (item) =>
+            `${item.field}:${normalizeText(item.value)}:${
+              item.link ?? ""
+            }:${item.searchType ?? searchType}`
+        )
+        .join("|");
+      if (seen.has(key)) {
+        return;
+      }
+      seen.add(key);
+      attempts.push(criteria);
+    };
+
+    const trimmed = value.trim();
+    if (trimmed) {
+      addAttempt([{ field: "9", value: trimmed }]);
+      addAttempt([{ field: "34", value: trimmed }]);
+    }
+
+    const tokens = this.tokenizeName(value);
+    for (const token of tokens) {
+      addAttempt([{ field: "9", value: token }]);
+      addAttempt([{ field: "34", value: token }]);
+    }
+
+    return attempts;
   }
 
   private async getUserSearchOptions(): Promise<Record<string, unknown>> {
@@ -402,6 +547,43 @@ export class GlpiClient {
     }
     this.detectedLoginFieldId = loginFieldId;
     return loginFieldId;
+  }
+
+  private async getUserEntityFieldId(): Promise<string | null> {
+    if (this.detectedEntityFieldId !== undefined) {
+      return this.detectedEntityFieldId;
+    }
+    const options = await this.getUserSearchOptions();
+    let entityFieldId: string | null = null;
+    for (const [key, value] of Object.entries(options)) {
+      if (!value || typeof value !== "object") {
+        continue;
+      }
+      if (!/^\d+$/.test(key)) {
+        continue;
+      }
+      const record = value as Record<string, unknown>;
+      const name = String(record.name ?? "").trim();
+      const table = String(record.table ?? "").trim().toLowerCase();
+      const field = String(record.field ?? "").trim().toLowerCase();
+      const nameNorm = normalizeText(name);
+      if (
+        table.includes("glpi_entities") ||
+        field.includes("entities_id") ||
+        nameNorm.includes("ENTIDAD") ||
+        nameNorm.includes("ENTITY")
+      ) {
+        entityFieldId = key;
+        break;
+      }
+    }
+    if (!entityFieldId && this.userEntityId) {
+      console.warn(
+        "No se encontro el campo de entidad en GLPI; se omite el filtro por entidad."
+      );
+    }
+    this.detectedEntityFieldId = entityFieldId;
+    return entityFieldId;
   }
 
   private isInvalidFieldIdError(messageText: string): boolean {
@@ -505,50 +687,34 @@ export class GlpiClient {
       return [];
     }
     const searchType = strict ? "equals" : "contains";
-    const splits = this.splitFullName(trimmed);
-    if (splits.length === 0) {
-      const loginFieldId = await this.getLoginFieldId();
-      return this.searchUsersByCriteria(
-        [{ field: loginFieldId, value: trimmed }],
-        "0-10",
-        searchType
-      );
-    }
 
-    let results: GlpiUserCandidate[] = [];
-    for (const split of splits) {
+    const attempts = this.buildNameSearchAttempts(trimmed, searchType);
+    for (const criteria of attempts) {
       const matches = await this.searchUsersByCriteria(
-        [
-          { field: "34", value: split.realname },
-          { field: "9", value: split.firstname, link: "AND" },
-        ],
+        criteria,
         "0-50",
         searchType
       );
-      results = results.concat(matches);
+      if (matches.length > 0) {
+        return this.dedupeCandidates(matches);
+      }
     }
-    results = this.dedupeCandidates(results);
-    if (results.length > 0) {
-      return results;
-    }
-    results = await this.searchUsersByCriteria(
-      [{ field: "34", value: trimmed }],
-      "0-50",
+
+    const singleAttempts = this.buildSingleFieldNameAttempts(
+      trimmed,
       searchType
     );
-    results = this.dedupeCandidates(results);
-    if (results.length > 0) {
-      return results;
+    for (const criteria of singleAttempts) {
+      const matches = await this.searchUsersByCriteria(
+        criteria,
+        "0-50",
+        searchType
+      );
+      if (matches.length > 0) {
+        return this.dedupeCandidates(matches);
+      }
     }
-    results = await this.searchUsersByCriteria(
-      [{ field: "9", value: trimmed }],
-      "0-50",
-      searchType
-    );
-    results = this.dedupeCandidates(results);
-    if (results.length > 0) {
-      return results;
-    }
+
     const loginFieldId = await this.getLoginFieldId();
     return this.searchUsersByCriteria(
       [{ field: loginFieldId, value: trimmed }],
