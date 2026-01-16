@@ -254,6 +254,17 @@ export class TicketFlow {
     const endCommand = matchCommand(normalized, END_COMMANDS);
     const isStart = Boolean(startCommand);
     const isEnd = Boolean(endCommand);
+    const isAuthorized = this.isAuthorizedSender(message);
+
+    if (!isAuthorized) {
+      if (session) {
+        this.sessions.delete(sessionKey);
+      }
+      if (isStart) {
+        await message.reply(this.buildUnauthorizedMessage(message));
+      }
+      return;
+    }
 
     if (isStart) {
       session = {
@@ -590,6 +601,18 @@ export class TicketFlow {
     }
     const value = this.options.technicianByPhone[message.senderNumber];
     return value ? value.trim() : null;
+  }
+
+  private isAuthorizedSender(message: MessageContext): boolean {
+    if (!message.senderNumber) {
+      return false;
+    }
+    return Boolean(this.options.technicianByPhone[message.senderNumber]);
+  }
+
+  private buildUnauthorizedMessage(message: MessageContext): string {
+    const mention = message.senderNumber ? `@${message.senderNumber}` : "@mención";
+    return `Lo lamento ${mention} tienes que estar en la lista de técnicos.`;
   }
 
   private async resolveUserId(
