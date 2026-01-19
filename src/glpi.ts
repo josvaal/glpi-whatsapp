@@ -2,9 +2,12 @@ import type { GlpiConfig } from "./config";
 import type { GlpiUserCandidate } from "./types";
 import { normalizeText } from "./text";
 
+const MAX_SCAN_MATCHES = 10;
+
 type GlpiRequestOptions = {
   method: string;
   body?: unknown;
+  useProfile?: boolean;
 };
 
 type GlpiSearchCriterion = {
@@ -17,6 +20,11 @@ type GlpiSearchCriterion = {
 type NameSplit = {
   realname: string;
   firstname: string;
+};
+
+type GlpiProfile = {
+  id: string;
+  name: string;
 };
 
 export type GlpiTicketInput = {
@@ -39,10 +47,19 @@ export class GlpiClient {
   private authHeader: string;
   private defaultRequester: string;
   private dniFieldIds: string[];
+  private profileId: string;
+  private profileName: string;
+  private searchProfileId: string;
+  private searchProfileName: string;
   private enabled: boolean;
   private sessionToken: string | null = null;
   private sessionPromise: Promise<string> | null = null;
+  private profileSessionToken: string | null = null;
+  private profileSessionPromise: Promise<string> | null = null;
+  private searchProfileSessionToken: string | null = null;
+  private searchProfileSessionPromise: Promise<string> | null = null;
   private defaultRequesterId: string | null = null;
+  private cachedProfiles: GlpiProfile[] | null = null;
   private detectedDniFieldIds: string[] | null = null;
   private detectedLoginFieldId: string | null = null;
   private detectedEntityFieldId: string | null | undefined = undefined;
@@ -52,6 +69,10 @@ export class GlpiClient {
   constructor(config: GlpiConfig) {
     this.baseUrl = config.baseUrl;
     this.defaultRequester = config.defaultRequester;
+    this.profileId = config.profileId;
+    this.profileName = config.profileName;
+    this.searchProfileId = config.searchProfileId;
+    this.searchProfileName = config.searchProfileName;
     const invalidIds = config.dniFieldIds.filter((id) => !/^\d+$/.test(id));
     if (invalidIds.length > 0) {
       console.warn(
@@ -139,15 +160,228 @@ export class GlpiClient {
     return this.sessionPromise;
   }
 
-  private async request(
+  private normalizeProfileName(value: string): string {
+    return normalizeText(value)
+      .replace(/[^A-Z0-9 ]+/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  private parseProfiles(response: unknown): GlpiProfile[] {
+    const records: Array<Record<string, unknown>> = [];
+    const addRecord = (item: unknown): void => {
+      if (item && typeof item === "object") {
+        records.push(item as Record<string, unknown>);
+      }
+    };
+    const addFromArray = (value: unknown): void => {
+      if (Array.isArray(value)) {
+        value.forEach(addRecord);
+      }
+    };
+
+    if (Array.isArray(response)) {
+      response.forEach(addRecord);
+    } else if (response && typeof response === "object") {
+      const obj = response as Record<string, unknown>;
+      if ("id" in obj || "profiles_id" in obj || "name" in obj) {
+        addRecord(obj);
+      }
+      for (const key of ["profiles", "myprofiles", "data", "profile"]) {
+        addFromArray(obj[key]);
+      }
+      for (const [key, value] of Object.entries(obj)) {
+        if (typeof value === "string" && /^\d+$/.test(key)) {
+          records.push({ id: key, name: value });
+          continue;
+        }
+        if (value && typeof value === "object" && !Array.isArray(value)) {
+          const nested = value as Record<string, unknown>;
+          if ("id" in nested || "profiles_id" in nested || "name" in nested) {
+            addRecord(nested);
+          }
+          for (const [nestedKey, nestedValue] of Object.entries(nested)) {
+            if (typeof nestedValue === "string" && /^\d+$/.test(nestedKey)) {
+              records.push({ id: nestedKey, name: nestedValue });
+            }
+          }
+        }
+      }
+    }
+
+    const parsed = records
+      .map((record) => {
+        const rawId = record.id ?? record["profiles_id"] ?? record["0"];
+        const id = String(rawId ?? "").trim();
+        const rawName =
+          record.name ?? record["profiles_name"] ?? record["1"] ?? record["name"];
+        const name = String(rawName ?? "").trim();
+        if (!id || !name) {
+          return null;
+        }
+        return { id, name };
+      })
+      .filter((item): item is GlpiProfile => Boolean(item));
+
+    const byId = new Map<string, GlpiProfile>();
+    for (const profile of parsed) {
+      if (!byId.has(profile.id)) {
+        byId.set(profile.id, profile);
+      }
+    }
+    return Array.from(byId.values());
+  }
+
+  private async getMyProfiles(): Promise<GlpiProfile[]> {
+    const response = await this.request("getMyProfiles", {
+      method: "GET",
+    });
+    return this.parseProfiles(response);
+  }
+
+  private async resolveProfileIdFor(
+    profileId: string,
+    profileName: string
+  ): Promise<string | null> {
+    if (profileId) {
+      return profileId;
+    }
+    const targetName = profileName.trim();
+    if (!targetName) {
+      return null;
+    }
+    const profiles = await this.getMyProfiles();
+    this.cachedProfiles = profiles;
+    const targetNormalized = this.normalizeProfileName(targetName);
+    const exact = profiles.find(
+      (profile) => this.normalizeProfileName(profile.name) === targetNormalized
+    );
+    if (exact) {
+      return exact.id;
+    }
+    const partial = profiles.filter((profile) =>
+      this.normalizeProfileName(profile.name).includes(targetNormalized)
+    );
+    if (partial.length === 1) {
+      return partial[0].id;
+    }
+    return null;
+  }
+
+  private async ensureProfileSession(): Promise<string> {
+    if (!this.profileId && !this.profileName) {
+      return this.ensureSession();
+    }
+    if (this.profileSessionToken) {
+      return this.profileSessionToken;
+    }
+    if (this.profileSessionPromise) {
+      return this.profileSessionPromise;
+    }
+    this.profileSessionPromise = (async () => {
+      const targetId = await this.resolveProfileIdFor(
+        this.profileId,
+        this.profileName
+      );
+      if (!targetId) {
+        const targetName = this.profileName.trim();
+        const label = targetName ? `perfil '${targetName}'` : "perfil configurado";
+        const available =
+          this.cachedProfiles?.map((profile) => profile.name).filter(Boolean) ?? [];
+        const details =
+          available.length > 0
+            ? ` Perfiles disponibles: ${available.join(", ")}.`
+            : "";
+        throw new Error(`No se encontro el ${label} en GLPI.${details}`);
+      }
+      const token = await this.initSession();
+      const numericId = Number(targetId);
+      const payloadId = Number.isNaN(numericId) ? targetId : numericId;
+      const { response, payload } = await this.requestWithSession(
+        token,
+        "changeActiveProfile",
+        {
+          method: "POST",
+          body: { profiles_id: payloadId },
+        }
+      );
+      if (!response.ok) {
+        throw new Error(
+          `GLPI changeActiveProfile fallo (${response.status}): ${
+            payload.text || "sin cuerpo"
+          }`
+        );
+      }
+      this.profileSessionToken = token;
+      return token;
+    })().finally(() => {
+      this.profileSessionPromise = null;
+    });
+    return this.profileSessionPromise;
+  }
+
+  private async ensureSearchProfileSession(): Promise<string> {
+    if (!this.searchProfileId && !this.searchProfileName) {
+      return this.ensureSession();
+    }
+    if (this.searchProfileSessionToken) {
+      return this.searchProfileSessionToken;
+    }
+    if (this.searchProfileSessionPromise) {
+      return this.searchProfileSessionPromise;
+    }
+    this.searchProfileSessionPromise = (async () => {
+      const targetId = await this.resolveProfileIdFor(
+        this.searchProfileId,
+        this.searchProfileName
+      );
+      if (!targetId) {
+        const targetName = this.searchProfileName.trim();
+        const label = targetName
+          ? `perfil '${targetName}'`
+          : "perfil de busqueda";
+        const available =
+          this.cachedProfiles?.map((profile) => profile.name).filter(Boolean) ?? [];
+        const details =
+          available.length > 0
+            ? ` Perfiles disponibles: ${available.join(", ")}.`
+            : "";
+        throw new Error(`No se encontro el ${label} en GLPI.${details}`);
+      }
+      const token = await this.initSession();
+      const numericId = Number(targetId);
+      const payloadId = Number.isNaN(numericId) ? targetId : numericId;
+      const { response, payload } = await this.requestWithSession(
+        token,
+        "changeActiveProfile",
+        {
+          method: "POST",
+          body: { profiles_id: payloadId },
+        }
+      );
+      if (!response.ok) {
+        throw new Error(
+          `GLPI changeActiveProfile fallo (${response.status}): ${
+            payload.text || "sin cuerpo"
+          }`
+        );
+      }
+      this.searchProfileSessionToken = token;
+      return token;
+    })().finally(() => {
+      this.searchProfileSessionPromise = null;
+    });
+    return this.searchProfileSessionPromise;
+  }
+
+  private async requestWithSession(
+    sessionToken: string,
     path: string,
-    options: GlpiRequestOptions,
-    retry = true
-  ): Promise<unknown> {
+    options: GlpiRequestOptions
+  ): Promise<{ response: Response; payload: { text: string; json?: unknown } }> {
     if (!this.enabled || !this.baseUrl) {
       throw new Error("GLPI no esta configurado.");
     }
-    const sessionToken = await this.ensureSession();
     const headers: Record<string, string> = {
       "Session-Token": sessionToken,
       Accept: "application/json",
@@ -165,6 +399,23 @@ export class GlpiClient {
     });
 
     const payload = await this.readResponsePayload(response);
+    return { response, payload };
+  }
+
+  private async request(
+    path: string,
+    options: GlpiRequestOptions,
+    retry = true
+  ): Promise<unknown> {
+    const useProfile = Boolean(options.useProfile);
+    const sessionToken = useProfile
+      ? await this.ensureProfileSession()
+      : await this.ensureSession();
+    const { response, payload } = await this.requestWithSession(
+      sessionToken,
+      path,
+      options
+    );
     const text = payload.text;
     if (!response.ok) {
       const invalidSession =
@@ -172,7 +423,14 @@ export class GlpiClient {
         text.includes("ERROR_SESSION_EXPIRED") ||
         response.status === 401;
       if (invalidSession && retry) {
-        this.sessionToken = null;
+        if (useProfile) {
+          this.profileSessionToken = null;
+          this.profileSessionPromise = null;
+        } else {
+          this.sessionToken = null;
+          this.sessionPromise = null;
+        }
+        this.cachedProfiles = null;
         return this.request(path, options, false);
       }
       throw new Error(
@@ -185,15 +443,53 @@ export class GlpiClient {
     return payload.json ?? text;
   }
 
+  private async requestForSearch(
+    path: string,
+    options: GlpiRequestOptions,
+    retry = true
+  ): Promise<unknown> {
+    if (!this.searchProfileId && !this.searchProfileName) {
+      return this.request(path, options, retry);
+    }
+    const sessionToken = await this.ensureSearchProfileSession();
+    const { response, payload } = await this.requestWithSession(
+      sessionToken,
+      path,
+      options
+    );
+    const text = payload.text;
+    if (!response.ok) {
+      const invalidSession =
+        text.includes("ERROR_SESSION_TOKEN_INVALID") ||
+        text.includes("ERROR_SESSION_EXPIRED") ||
+        response.status === 401;
+      if (invalidSession && retry) {
+        this.searchProfileSessionToken = null;
+        this.searchProfileSessionPromise = null;
+        this.cachedProfiles = null;
+        return this.requestForSearch(path, options, false);
+      }
+      throw new Error(
+        `GLPI ${options.method} ${path} fallo (${response.status}): ${
+          text || "sin cuerpo"
+        }`
+      );
+    }
+    return payload.json ?? text;
+  }
+
   private async requestMultipart(
     path: string,
     form: FormData,
+    useProfile = false,
     retry = true
   ): Promise<unknown> {
     if (!this.enabled || !this.baseUrl) {
       throw new Error("GLPI no esta configurado.");
     }
-    const sessionToken = await this.ensureSession();
+    const sessionToken = useProfile
+      ? await this.ensureProfileSession()
+      : await this.ensureSession();
     const headers: Record<string, string> = {
       "Session-Token": sessionToken,
       Accept: "application/json",
@@ -213,8 +509,15 @@ export class GlpiClient {
         text.includes("ERROR_SESSION_EXPIRED") ||
         response.status === 401;
       if (invalidSession && retry) {
-        this.sessionToken = null;
-        return this.requestMultipart(path, form, false);
+        if (useProfile) {
+          this.profileSessionToken = null;
+          this.profileSessionPromise = null;
+        } else {
+          this.sessionToken = null;
+          this.sessionPromise = null;
+        }
+        this.cachedProfiles = null;
+        return this.requestMultipart(path, form, useProfile, false);
       }
       throw new Error(
         `GLPI POST ${path} fallo (${response.status}): ${text || "sin cuerpo"}`
@@ -320,7 +623,7 @@ export class GlpiClient {
     params.push(["range", range]);
 
     const query = this.buildQueryString(params);
-    const response = await this.request(`search/User?${query}`, {
+    const response = await this.requestForSearch(`search/User?${query}`, {
       method: "GET",
     });
     return this.parseUserCandidates(response);
@@ -366,6 +669,63 @@ export class GlpiClient {
       .split(/\s+/)
       .map((part) => part.trim())
       .filter(Boolean);
+  }
+
+  private normalizeNameValue(value: string): string {
+    return normalizeText(value)
+      .replace(/[^A-Z0-9 ]+/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  private buildCandidateSearchText(candidate: GlpiUserCandidate): string {
+    const parts = [candidate.firstname, candidate.realname, candidate.login]
+      .map((value) => value?.trim())
+      .filter(Boolean) as string[];
+    return this.normalizeNameValue(parts.join(" "));
+  }
+
+  private filterCandidatesByName(
+    candidates: GlpiUserCandidate[],
+    query: string
+  ): GlpiUserCandidate[] {
+    const tokens = this.normalizeNameValue(query)
+      .split(/\s+/)
+      .filter(Boolean);
+    if (tokens.length === 0) {
+      return candidates;
+    }
+    return candidates.filter((candidate) => {
+      const haystack = this.buildCandidateSearchText(candidate);
+      if (!haystack) {
+        return false;
+      }
+      return tokens.every((token) => haystack.includes(token));
+    });
+  }
+
+  private async scanUsersByName(
+    query: string,
+    maxRange = 1000,
+    pageSize = 50
+  ): Promise<GlpiUserCandidate[]> {
+    const matches: GlpiUserCandidate[] = [];
+    for (let start = 0; start <= maxRange; start += pageSize) {
+      const end = start + pageSize - 1;
+      const range = `${start}-${end}`;
+      const page = await this.searchUsersByCriteria([], range, "contains");
+      const filtered = this.filterCandidatesByName(page, query);
+      if (filtered.length > 0) {
+        matches.push(...filtered);
+      }
+      if (page.length < pageSize) {
+        break;
+      }
+      if (matches.length >= MAX_SCAN_MATCHES) {
+        break;
+      }
+    }
+    return this.dedupeCandidates(matches);
   }
 
   private buildNameSearchAttempts(
@@ -474,7 +834,7 @@ export class GlpiClient {
     if (this.searchOptionsCache) {
       return this.searchOptionsCache;
     }
-    const response = await this.request("listSearchOptions/User", {
+    const response = await this.requestForSearch("listSearchOptions/User", {
       method: "GET",
     });
     const options =
@@ -668,7 +1028,7 @@ export class GlpiClient {
     if (results.length === 0) {
       try {
         const query = this.buildQueryString([["searchText", cleaned]]);
-        const response = await this.request(`User?${query}`, {
+        const response = await this.requestForSearch(`User?${query}`, {
           method: "GET",
         });
         results = results.concat(this.parseUserCandidates(response));
@@ -687,16 +1047,34 @@ export class GlpiClient {
       return [];
     }
     const searchType = strict ? "equals" : "contains";
+    const primaryRange = "0-50";
+    const extendedRange = "0-500";
+    let unfilteredCriteria: GlpiSearchCriterion[] | null = null;
+
+    const handleMatches = (
+      matches: GlpiUserCandidate[],
+      criteria: GlpiSearchCriterion[]
+    ): GlpiUserCandidate[] | null => {
+      const filtered = this.filterCandidatesByName(matches, trimmed);
+      if (filtered.length > 0) {
+        return filtered;
+      }
+      if (matches.length > 0 && !unfilteredCriteria) {
+        unfilteredCriteria = criteria;
+      }
+      return null;
+    };
 
     const attempts = this.buildNameSearchAttempts(trimmed, searchType);
     for (const criteria of attempts) {
       const matches = await this.searchUsersByCriteria(
         criteria,
-        "0-50",
+        primaryRange,
         searchType
       );
-      if (matches.length > 0) {
-        return this.dedupeCandidates(matches);
+      const filtered = handleMatches(matches, criteria);
+      if (filtered) {
+        return this.dedupeCandidates(filtered);
       }
     }
 
@@ -707,20 +1085,54 @@ export class GlpiClient {
     for (const criteria of singleAttempts) {
       const matches = await this.searchUsersByCriteria(
         criteria,
-        "0-50",
+        primaryRange,
         searchType
       );
-      if (matches.length > 0) {
-        return this.dedupeCandidates(matches);
+      const filtered = handleMatches(matches, criteria);
+      if (filtered) {
+        return this.dedupeCandidates(filtered);
       }
     }
 
     const loginFieldId = await this.getLoginFieldId();
-    return this.searchUsersByCriteria(
+    const loginMatches = await this.searchUsersByCriteria(
       [{ field: loginFieldId, value: trimmed }],
-      "0-50",
+      primaryRange,
       searchType
     );
+    const filteredLogin = handleMatches(loginMatches, [
+      { field: loginFieldId, value: trimmed },
+    ]);
+    if (filteredLogin) {
+      return this.dedupeCandidates(filteredLogin);
+    }
+
+    if (unfilteredCriteria) {
+      const extendedMatches = await this.searchUsersByCriteria(
+        unfilteredCriteria,
+        extendedRange,
+        searchType
+      );
+      const filtered = this.filterCandidatesByName(extendedMatches, trimmed);
+      if (filtered.length > 0) {
+        return this.dedupeCandidates(filtered);
+      }
+    }
+
+    try {
+      const query = this.buildQueryString([["searchText", trimmed]]);
+      const response = await this.requestForSearch(`User?${query}`, {
+        method: "GET",
+      });
+      const results = this.parseUserCandidates(response);
+      const filtered = this.filterCandidatesByName(results, trimmed);
+      return this.dedupeCandidates(filtered);
+    } catch {
+      // Ignore searchText fallback errors.
+    }
+
+    const scanned = await this.scanUsersByName(trimmed);
+    return this.dedupeCandidates(scanned);
   }
 
   async resolveDefaultRequesterId(): Promise<string | null> {
@@ -760,6 +1172,7 @@ export class GlpiClient {
     const response = await this.request("Ticket", {
       method: "POST",
       body: { input: payload },
+      useProfile: true,
     });
 
     const data = response as Record<string, unknown> | null;
@@ -791,6 +1204,7 @@ export class GlpiClient {
           itemtype: "Ticket",
         },
       },
+      useProfile: true,
     });
 
     return String(documentId);
@@ -815,7 +1229,7 @@ export class GlpiClient {
         form.append("uploadManifest", JSON.stringify(manifest));
         const blob = new Blob([bytes], { type: document.mime });
         form.append("filename", blob, document.filename);
-        return await this.requestMultipart("Document", form);
+        return await this.requestMultipart("Document", form, true);
       } catch (err) {
         const messageText = err instanceof Error ? err.message : String(err);
         console.warn(
@@ -834,6 +1248,7 @@ export class GlpiClient {
           base64: document.base64,
         },
       },
+      useProfile: true,
     });
   }
 }

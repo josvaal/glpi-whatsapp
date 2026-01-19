@@ -59,6 +59,14 @@ export type TicketDraft = {
   solicitante?: string;
   asignado?: string;
   problema?: string;
+  categoria?: string;
+  nombre?: string;
+  dni?: string;
+  celular?: string;
+  correo?: string;
+  cargo?: string;
+  dependencia?: string;
+  piso?: string;
   rawText: string;
   isComplete: boolean;
 };

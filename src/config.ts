@@ -18,6 +18,10 @@ export type GlpiConfig = {
   password: string;
   defaultRequester: string;
   dniFieldIds: string[];
+  profileId: string;
+  profileName: string;
+  searchProfileId: string;
+  searchProfileName: string;
   enabled: boolean;
 };
 
@@ -104,6 +108,10 @@ export function loadConfig(): AppConfig {
   const glpiUser = (process.env.GLPI_USER || "").trim();
   const glpiPassword = (process.env.GLPI_PASSWORD || "").trim();
   const glpiDefaultRequester = (process.env.GLPI_DEFAULT_REQUESTER || "").trim();
+  const glpiProfileId = (process.env.GLPI_PROFILE_ID || "").trim();
+  const glpiProfileName = (process.env.GLPI_PROFILE_NAME || "OPERADOR").trim();
+  const glpiSearchProfileId = (process.env.GLPI_SEARCH_PROFILE_ID || "").trim();
+  const glpiSearchProfileName = (process.env.GLPI_SEARCH_PROFILE_NAME || "").trim();
   const dniFieldIds = (process.env.GLPI_DNI_FIELD_IDS || "")
     .split(",")
     .map((value) => value.trim())
@@ -157,6 +165,10 @@ export function loadConfig(): AppConfig {
       password: glpiPassword,
       defaultRequester: glpiDefaultRequester,
       dniFieldIds,
+      profileId: glpiProfileId,
+      profileName: glpiProfileName,
+      searchProfileId: glpiSearchProfileId,
+      searchProfileName: glpiSearchProfileName,
       enabled: glpiEnabled,
     },
     categoriesPath,

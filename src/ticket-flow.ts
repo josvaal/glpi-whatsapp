@@ -76,6 +76,15 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
 function buildCommandRegex(command: string): RegExp {
   const tokens = command.trim().split(/\s+/).map(escapeRegExp);
   const pattern = tokens.join("\\s+");
@@ -173,10 +182,32 @@ function buildTicketTitle(problem: string): string {
 }
 
 function buildTicketContent(draft: TicketDraft): string {
+  const labelStyle = "font-weight: bold; color: navy;";
+  const solicitanteValue = draft.solicitante || "";
+  const dniValue = draft.dni || extractDni(solicitanteValue) || "";
+  const nombreValue =
+    draft.nombre || (!dniValue && solicitanteValue ? solicitanteValue : "");
+
+  const problema = escapeHtml(draft.problema || "");
+  const categoria = escapeHtml(draft.categoria || "");
+  const nombre = escapeHtml(nombreValue);
+  const dni = escapeHtml(dniValue);
+  const celular = escapeHtml(draft.celular || "");
+  const correo = escapeHtml(draft.correo || "");
+  const cargo = escapeHtml(draft.cargo || "");
+  const dependencia = escapeHtml(draft.dependencia || "");
+  const piso = escapeHtml(draft.piso || "");
+
   return [
-    `PROBLEMA: ${draft.problema || ""}`,
-    `SOLICITANTE: ${draft.solicitante || ""}`,
-    `ASIGNADO: ${draft.asignado || ""}`,
+    `<p><span style="${labelStyle}">Solicitud o incidente:</span> ${problema}</p>`,
+    `<p><span style="${labelStyle}">Sistema o bien:</span> ${categoria}</p>`,
+    `<p><span style="${labelStyle}">Nombre:</span> ${nombre}</p>`,
+    `<p><span style="${labelStyle}">N\u00B0 DNI:</span> ${dni}</p>`,
+    `<p><span style="${labelStyle}">Celular:</span> ${celular}</p>`,
+    `<p><span style="${labelStyle}">Correo:</span> ${correo}</p>`,
+    `<p><span style="${labelStyle}">Cargo:</span> ${cargo}</p>`,
+    `<p><span style="${labelStyle}">Dependencia:</span> ${dependencia}</p>`,
+    `<p><span style="${labelStyle}">Piso:</span> ${piso}</p>`,
   ].join("\n");
 }
 
@@ -430,15 +461,23 @@ export class TicketFlow {
       session.resolvedAssigneeId = null;
     }
 
+    const mergedSolicitante = parsed.solicitante || session.draft?.solicitante;
+    const mergedProblema = parsed.problema || session.draft?.problema;
+
     session.draft = {
-      solicitante: parsed.solicitante || session.draft?.solicitante,
+      solicitante: mergedSolicitante,
       asignado: parsed.asignado || session.draft?.asignado,
-      problema: parsed.problema || session.draft?.problema,
+      problema: mergedProblema,
+      categoria: parsed.categoria || session.draft?.categoria,
+      nombre: parsed.nombre || session.draft?.nombre,
+      dni: parsed.dni || session.draft?.dni,
+      celular: parsed.celular || session.draft?.celular,
+      correo: parsed.correo || session.draft?.correo,
+      cargo: parsed.cargo || session.draft?.cargo,
+      dependencia: parsed.dependencia || session.draft?.dependencia,
+      piso: parsed.piso || session.draft?.piso,
       rawText: parsed.rawText,
-      isComplete: Boolean(
-        (parsed.solicitante || session.draft?.solicitante) &&
-          (parsed.problema || session.draft?.problema)
-      ),
+      isComplete: Boolean(mergedSolicitante && mergedProblema),
     };
     session.awaitingText = false;
 
@@ -808,6 +847,9 @@ export class TicketFlow {
       session.resolvedRequesterId = candidate.id;
       if (session.draft) {
         session.draft.solicitante = name;
+        if (!session.draft.nombre) {
+          session.draft.nombre = name;
+        }
       }
       return;
     }

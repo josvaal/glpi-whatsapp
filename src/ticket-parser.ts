@@ -1,10 +1,21 @@
 import type { TicketDraft } from "./types";
 import { normalizeTemplateKey } from "./text";
 
-const KEY_MAP: Record<string, "solicitante" | "asignado" | "problema"> = {
+type TicketField =
+  | "solicitante"
+  | "asignado"
+  | "problema"
+  | "categoria"
+  | "nombre"
+  | "dni"
+  | "celular"
+  | "correo"
+  | "cargo"
+  | "dependencia"
+  | "piso";
+
+const KEY_MAP: Record<string, TicketField> = {
   SOLICITANTE: "solicitante",
-  "DNI SOLICITANTE": "solicitante",
-  "SOLICITANTE DNI": "solicitante",
   USUARIO: "solicitante",
   "USUARIO SOLICITANTE": "solicitante",
   ASIGNADO: "asignado",
@@ -12,7 +23,61 @@ const KEY_MAP: Record<string, "solicitante" | "asignado" | "problema"> = {
   RESPONSABLE: "asignado",
   PROBLEMA: "problema",
   DESCRIPCION: "problema",
+  SOLICITUD: "problema",
+  INCIDENTE: "problema",
+  "SOLICITUD O INCIDENTE": "problema",
+  "SOLICITUD INCIDENTE": "problema",
+  CATEGORIA: "categoria",
+  "CATEGORIA PROBLEMA": "categoria",
+  SISTEMA: "categoria",
+  BIEN: "categoria",
+  "SISTEMA O BIEN": "categoria",
+  "SISTEMA BIEN": "categoria",
+  NOMBRE: "nombre",
+  NOMBRES: "nombre",
+  "NOMBRE COMPLETO": "nombre",
+  APELLIDOS: "nombre",
+  "APELLIDOS Y NOMBRES": "nombre",
+  DNI: "dni",
+  "DNI SOLICITANTE": "dni",
+  "SOLICITANTE DNI": "dni",
+  DOCUMENTO: "dni",
+  "DOCUMENTO IDENTIDAD": "dni",
+  "DOC IDENTIDAD": "dni",
+  "N DNI": "dni",
+  "NRO DNI": "dni",
+  "NRO DE DNI": "dni",
+  "NUMERO DNI": "dni",
+  "NUMERO DE DNI": "dni",
+  CELULAR: "celular",
+  CEL: "celular",
+  TELEFONO: "celular",
+  "TELEFONO CELULAR": "celular",
+  "TELEFONO MOVIL": "celular",
+  MOVIL: "celular",
+  CORREO: "correo",
+  EMAIL: "correo",
+  "E MAIL": "correo",
+  MAIL: "correo",
+  "CORREO ELECTRONICO": "correo",
+  CARGO: "cargo",
+  PUESTO: "cargo",
+  FUNCION: "cargo",
+  DEPENDENCIA: "dependencia",
+  OFICINA: "dependencia",
+  AREA: "dependencia",
+  UNIDAD: "dependencia",
+  SEDE: "dependencia",
+  PISO: "piso",
 };
+
+function normalizeTicketKey(value: string): string {
+  return normalizeTemplateKey(value)
+    .replace(/[\u00BA\u00B0]/g, " ")
+    .replace(/[^A-Z0-9 ]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
 
 function splitByDash(value: string): string[] {
   return value
@@ -26,21 +91,111 @@ function looksLikeDni(value: string): boolean {
   return digits.length === 8;
 }
 
+const PROBLEM_HINTS = new Set([
+  "NO",
+  "SIN",
+  "ERROR",
+  "FALLA",
+  "FALLANDO",
+  "PROBLEMA",
+  "SOLICITO",
+  "SOLICITUD",
+  "SOLICITAR",
+  "IMPRIME",
+  "IMPRIMIR",
+  "IMPRESORA",
+  "CORREO",
+  "EMAIL",
+  "OUTLOOK",
+  "INTERNET",
+  "RED",
+  "VPN",
+  "SISTEMA",
+  "APLICACION",
+  "APP",
+  "PC",
+  "CPU",
+  "LAPTOP",
+  "NOTEBOOK",
+  "MONITOR",
+  "ESCANER",
+  "SCANNER",
+  "CLAVE",
+  "CONTRASENA",
+  "PASSWORD",
+  "ACCESO",
+  "INGRESAR",
+  "ENTRAR",
+  "CUENTA",
+  "BLOQUEO",
+  "BLOQUEADO",
+  "BLOQUEADA",
+  "LENTO",
+  "LENTA",
+  "ACTUALIZAR",
+  "ACTUALIZACION",
+  "INSTALAR",
+  "INSTALACION",
+  "CAMBIO",
+  "CAMBIAR",
+  "URGENTE",
+]);
+
+function tokenizeWords(value: string): string[] {
+  return normalizeTemplateKey(value)
+    .split(/\s+/)
+    .map((token) => token.trim())
+    .filter(Boolean);
+}
+
+function hasProblemHints(value: string): boolean {
+  const tokens = tokenizeWords(value);
+  return tokens.some((token) => PROBLEM_HINTS.has(token));
+}
+
+function looksLikeName(value: string): boolean {
+  const tokens = tokenizeWords(value);
+  if (tokens.length < 2 || tokens.length > 6) {
+    return false;
+  }
+  if (hasProblemHints(value)) {
+    return false;
+  }
+  return tokens.every((token) => /^[A-Z]+$/.test(token));
+}
+
+function looksLikeProblem(value: string): boolean {
+  if (/\d/.test(value)) {
+    return true;
+  }
+  return hasProblemHints(value);
+}
+
 function buildDraft(
-  solicitante?: string,
-  asignado?: string,
-  problema?: string,
+  data: Partial<TicketDraft>,
   rawText = ""
 ): TicketDraft | null {
-  const hasAny = Boolean(solicitante || asignado || problema);
+  const hasAny = Object.entries(data).some(
+    ([key, value]) =>
+      key !== "rawText" && key !== "isComplete" && Boolean(value)
+  );
   if (!hasAny) {
     return null;
   }
-  const isComplete = Boolean(solicitante && problema);
+
+  const solicitante = data.solicitante;
+  const inferredDni =
+    data.dni || (solicitante && looksLikeDni(solicitante) ? solicitante : undefined);
+  const inferredNombre =
+    data.nombre || (!inferredDni && solicitante ? solicitante : undefined);
+  const finalSolicitante = solicitante ?? inferredDni ?? inferredNombre;
+  const isComplete = Boolean(finalSolicitante && data.problema);
+
   return {
-    solicitante,
-    asignado,
-    problema,
+    ...data,
+    solicitante: finalSolicitante,
+    dni: inferredDni,
+    nombre: inferredNombre,
     rawText,
     isComplete,
   };
@@ -66,14 +221,27 @@ export function parseKeyValueTemplate(body: string): TicketDraft | null {
     if (!rawKey || !value) {
       continue;
     }
-    const key = normalizeTemplateKey(rawKey);
+    const key = normalizeTicketKey(rawKey);
     const mapped = KEY_MAP[key];
-    if (mapped) {
-      data[mapped] = value;
+    if (!mapped) {
+      continue;
     }
+    if (mapped === "dni") {
+      data.dni = value;
+      data.solicitante = value;
+      continue;
+    }
+    if (mapped === "nombre") {
+      data.nombre = value;
+      if (!data.solicitante) {
+        data.solicitante = value;
+      }
+      continue;
+    }
+    data[mapped] = value;
   }
 
-  return buildDraft(data.solicitante, data.asignado, data.problema, body);
+  return buildDraft(data, body);
 }
 
 export function parseInlineTemplate(body: string): TicketDraft | null {
@@ -102,7 +270,7 @@ export function parseInlineTemplate(body: string): TicketDraft | null {
     }
   }
 
-  return buildDraft(solicitante, asignado, problema, body);
+  return buildDraft({ solicitante, asignado, problema }, body);
 }
 
 export function parseLooseDashTemplate(body: string): TicketDraft | null {
@@ -122,18 +290,36 @@ export function parseLooseDashTemplate(body: string): TicketDraft | null {
   const secondDni = looksLikeDni(second);
 
   if (firstDni && !secondDni) {
-    return buildDraft(first, undefined, second, body);
+    return buildDraft({ solicitante: first, problema: second }, body);
   }
   if (secondDni && !firstDni) {
-    return buildDraft(second, undefined, first, body);
+    return buildDraft({ solicitante: second, problema: first }, body);
+  }
+
+  const firstNameLike = looksLikeName(first);
+  const secondNameLike = looksLikeName(second);
+  if (firstNameLike && !secondNameLike) {
+    return buildDraft({ solicitante: first, problema: second }, body);
+  }
+  if (secondNameLike && !firstNameLike) {
+    return buildDraft({ solicitante: second, problema: first }, body);
+  }
+
+  const firstProblemLike = looksLikeProblem(first);
+  const secondProblemLike = looksLikeProblem(second);
+  if (firstProblemLike && !secondProblemLike) {
+    return buildDraft({ solicitante: second, problema: first }, body);
+  }
+  if (secondProblemLike && !firstProblemLike) {
+    return buildDraft({ solicitante: first, problema: second }, body);
   }
 
   const firstLen = first.length;
   const secondLen = second.length;
   if (firstLen >= secondLen) {
-    return buildDraft(second, undefined, first, body);
+    return buildDraft({ solicitante: second, problema: first }, body);
   }
-  return buildDraft(first, undefined, second, body);
+  return buildDraft({ solicitante: first, problema: second }, body);
 }
 
 export function parseTicketText(body: string): TicketDraft | null {
