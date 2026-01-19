@@ -584,6 +584,7 @@ export class GlpiClient {
       ? await this.getUserEntityFieldId()
       : null;
     let criteriaWithEntity = criteria;
+    let usedEntityFilter = false;
     if (entityFieldId && this.userEntityId) {
       const normalizedEntity = this.userEntityId.trim();
       if (normalizedEntity) {
@@ -601,32 +602,50 @@ export class GlpiClient {
           },
           ...rest,
         ];
+        usedEntityFilter = true;
       }
     }
 
-    const params: Array<[string, string]> = [];
-    criteriaWithEntity.forEach((item, index) => {
-      if (item.link) {
-        params.push([`criteria[${index}][link]`, item.link]);
-      }
-      params.push([`criteria[${index}][field]`, item.field]);
-      params.push([
-        `criteria[${index}][searchtype]`,
-        item.searchType ?? searchType,
-      ]);
-      params.push([`criteria[${index}][value]`, item.value]);
-    });
-    params.push(["forcedisplay[0]", "2"]);
-    params.push(["forcedisplay[1]", "1"]);
-    params.push(["forcedisplay[2]", "9"]);
-    params.push(["forcedisplay[3]", "34"]);
-    params.push(["range", range]);
+    const buildParams = (
+      criteriaList: GlpiSearchCriterion[]
+    ): Array<[string, string]> => {
+      const params: Array<[string, string]> = [];
+      criteriaList.forEach((item, index) => {
+        if (item.link) {
+          params.push([`criteria[${index}][link]`, item.link]);
+        }
+        params.push([`criteria[${index}][field]`, item.field]);
+        params.push([
+          `criteria[${index}][searchtype]`,
+          item.searchType ?? searchType,
+        ]);
+        params.push([`criteria[${index}][value]`, item.value]);
+      });
+      params.push(["forcedisplay[0]", "2"]);
+      params.push(["forcedisplay[1]", "1"]);
+      params.push(["forcedisplay[2]", "9"]);
+      params.push(["forcedisplay[3]", "34"]);
+      params.push(["range", range]);
+      return params;
+    };
 
-    const query = this.buildQueryString(params);
+    const query = this.buildQueryString(buildParams(criteriaWithEntity));
     const response = await this.requestForSearch(`search/User?${query}`, {
       method: "GET",
     });
-    return this.parseUserCandidates(response);
+    const parsed = this.parseUserCandidates(response);
+    if (parsed.length > 0 || !usedEntityFilter) {
+      return parsed;
+    }
+
+    const fallbackQuery = this.buildQueryString(buildParams(criteria));
+    const fallbackResponse = await this.requestForSearch(
+      `search/User?${fallbackQuery}`,
+      {
+        method: "GET",
+      }
+    );
+    return this.parseUserCandidates(fallbackResponse);
   }
 
   private splitFullName(fullName: string): NameSplit[] {
