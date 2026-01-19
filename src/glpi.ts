@@ -27,6 +27,19 @@ type GlpiProfile = {
   name: string;
 };
 
+type UserFieldIds = {
+  id?: string;
+  email?: string;
+  phone?: string;
+  mobile?: string;
+  category?: string;
+  title?: string;
+  entity?: string;
+  location?: string;
+  floor?: string;
+  dni?: string[];
+};
+
 export type GlpiTicketInput = {
   title: string;
   content: string;
@@ -63,6 +76,7 @@ export class GlpiClient {
   private detectedDniFieldIds: string[] | null = null;
   private detectedLoginFieldId: string | null = null;
   private detectedEntityFieldId: string | null | undefined = undefined;
+  private detectedUserFieldIds: UserFieldIds | null = null;
   private searchOptionsCache: Record<string, unknown> | null = null;
   private readonly userEntityId = "26";
 
@@ -536,6 +550,184 @@ export class GlpiClient {
       .join("&");
   }
 
+  private toStringValue(value: unknown): string {
+    if (value === null || value === undefined) {
+      return "";
+    }
+    if (typeof value === "string") {
+      return value.trim();
+    }
+    if (typeof value === "number" || typeof value === "boolean") {
+      return String(value).trim();
+    }
+    return "";
+  }
+
+  private pickRecordValue(
+    record: Record<string, unknown>,
+    keys: Array<string | undefined>
+  ): string {
+    for (const key of keys) {
+      if (!key) {
+        continue;
+      }
+      const value = this.toStringValue(record[key]);
+      if (value) {
+        return value;
+      }
+    }
+    return "";
+  }
+
+  private async getUserFieldIds(): Promise<UserFieldIds> {
+    if (this.detectedUserFieldIds) {
+      return this.detectedUserFieldIds;
+    }
+    const options = await this.getUserSearchOptions();
+    const ids: UserFieldIds = {};
+    for (const [key, value] of Object.entries(options)) {
+      if (!value || typeof value !== "object") {
+        continue;
+      }
+      if (!/^\d+$/.test(key)) {
+        continue;
+      }
+      const record = value as Record<string, unknown>;
+      const name = String(record.name ?? "").trim();
+      const nameNorm = normalizeText(name);
+      const table = String(record.table ?? "").trim().toLowerCase();
+      const field = String(record.field ?? "").trim().toLowerCase();
+
+      if (
+        !ids.id &&
+        (field === "id" || nameNorm === "ID") &&
+        (table.includes("glpi_users") || table === "")
+      ) {
+        ids.id = key;
+        continue;
+      }
+
+      if (
+        !ids.email &&
+        (field.includes("email") ||
+          table.includes("usermail") ||
+          nameNorm.includes("CORREO") ||
+          nameNorm.includes("EMAIL"))
+      ) {
+        ids.email = key;
+      }
+
+      if (
+        !ids.mobile &&
+        (nameNorm.includes("MOVIL") ||
+          nameNorm.includes("MOBILE") ||
+          nameNorm.includes("CELULAR"))
+      ) {
+        ids.mobile = key;
+      }
+
+      if (
+        !ids.phone &&
+        (nameNorm.includes("TELEFONO") || nameNorm.includes("PHONE")) &&
+        !nameNorm.includes("MOVIL") &&
+        !nameNorm.includes("MOBILE") &&
+        !nameNorm.includes("CELULAR")
+      ) {
+        ids.phone = key;
+      }
+
+      if (
+        !ids.title &&
+        (field.includes("title") ||
+          field.includes("usertitles") ||
+          nameNorm.includes("CARGO") ||
+          nameNorm.includes("PUESTO") ||
+          nameNorm.includes("FUNCION") ||
+          nameNorm.includes("TITLE"))
+      ) {
+        ids.title = key;
+      }
+
+      if (!ids.category && nameNorm.includes("CATEGORIA")) {
+        ids.category = key;
+      }
+
+      if (
+        !ids.location &&
+        (field.includes("locations_id") ||
+          nameNorm.includes("UBICACION") ||
+          nameNorm.includes("LOCALIZACION") ||
+          nameNorm.includes("LOCATION"))
+      ) {
+        ids.location = key;
+      }
+
+      if (
+        !ids.floor &&
+        (nameNorm.includes("PISO") || nameNorm.includes("FLOOR"))
+      ) {
+        ids.floor = key;
+      }
+    }
+
+    const entityFieldId = await this.getUserEntityFieldId();
+    if (entityFieldId) {
+      ids.entity = entityFieldId;
+    }
+    const dniFieldIds = await this.getDniFieldIds();
+    if (dniFieldIds.length > 0) {
+      ids.dni = dniFieldIds;
+    }
+
+    this.detectedUserFieldIds = ids;
+    return ids;
+  }
+
+  private async getUserForcedDisplayFields(): Promise<string[]> {
+    const ids = await this.getUserFieldIds();
+    const loginFieldId = await this.getLoginFieldId();
+    const forced = new Set<string>();
+    const add = (value: string | undefined): void => {
+      if (!value || !/^\d+$/.test(value)) {
+        return;
+      }
+      forced.add(value);
+    };
+    add(ids.id ?? "2");
+    add(loginFieldId);
+    add("9");
+    add("34");
+    add(ids.email);
+    add(ids.phone);
+    add(ids.mobile);
+    add(ids.category);
+    add(ids.title);
+    add(ids.entity);
+    add(ids.location);
+    add(ids.floor);
+    if (ids.dni) {
+      ids.dni.forEach((dniId) => add(dniId));
+    }
+    return Array.from(forced);
+  }
+
+  private async searchUsersByText(
+    query: string,
+    range = "0-50"
+  ): Promise<GlpiUserCandidate[]> {
+    const forcedDisplay = await this.getUserForcedDisplayFields();
+    const params: Array<[string, string]> = [["searchText", query]];
+    forcedDisplay.forEach((fieldId, index) => {
+      params.push([`forcedisplay[${index}]`, fieldId]);
+    });
+    params.push(["range", range]);
+    const searchQuery = this.buildQueryString(params);
+    const response = await this.requestForSearch(`search/User?${searchQuery}`, {
+      method: "GET",
+    });
+    return this.parseUserCandidates(response);
+  }
+
   private parseUserCandidates(response: unknown): GlpiUserCandidate[] {
     const data = Array.isArray(response)
       ? response
@@ -545,24 +737,87 @@ export class GlpiClient {
     if (!Array.isArray(data)) {
       return [];
     }
-    return data
-      .map((item) => {
+    const fieldIds = this.detectedUserFieldIds;
+    const candidates: Array<GlpiUserCandidate | null> = data.map(
+      (item): GlpiUserCandidate | null => {
         const record = item as Record<string, unknown>;
-        const rawId = record.id ?? record["2"] ?? record["0"];
-        const id = String(rawId ?? "").trim();
+        const id = this.pickRecordValue(record, [
+          fieldIds?.id,
+          "2",
+          "0",
+          "id",
+          "users_id",
+        ]);
         if (!/^\d+$/.test(id)) {
           return null;
         }
+        const login = this.pickRecordValue(record, [
+          this.detectedLoginFieldId ?? undefined,
+          "1",
+          "name",
+          "login",
+          "username",
+        ]);
+        const firstname = this.pickRecordValue(record, ["9", "firstname"]);
+        const realname = this.pickRecordValue(record, ["34", "realname"]);
+        const email = this.pickRecordValue(record, [
+          fieldIds?.email,
+          "5",
+          "email",
+        ]);
+        const phone = this.pickRecordValue(record, [
+          fieldIds?.phone,
+          "10",
+          "phone",
+          "telephone",
+        ]);
+        const mobile = this.pickRecordValue(record, [
+          fieldIds?.mobile,
+          "11",
+          "mobile",
+          "mobilephone",
+        ]);
+        const category = this.pickRecordValue(record, [
+          fieldIds?.category,
+          "category",
+        ]);
+        const title = this.pickRecordValue(record, [fieldIds?.title, "title"]);
+        const entity = this.pickRecordValue(record, [
+          fieldIds?.entity,
+          "entity",
+        ]);
+        const location = this.pickRecordValue(record, [
+          fieldIds?.location,
+          "location",
+        ]);
+        const floor = this.pickRecordValue(record, [
+          fieldIds?.floor,
+          "floor",
+        ]);
+        let dni = "";
+        if (fieldIds?.dni) {
+          dni = this.pickRecordValue(record, fieldIds.dni);
+        }
         return {
           id,
-          login: String(
-            record["1"] ?? record.name ?? record.login ?? record.username ?? ""
-          ).trim(),
-          firstname: String(record["9"] ?? record.firstname ?? "").trim(),
-          realname: String(record["34"] ?? record.realname ?? "").trim(),
+          login,
+          firstname,
+          realname,
+          email: email || undefined,
+          phone: phone || undefined,
+          mobile: mobile || undefined,
+          category: category || undefined,
+          title: title || undefined,
+          entity: entity || undefined,
+          location: location || undefined,
+          floor: floor || undefined,
+          dni: dni || undefined,
         };
-      })
-      .filter((item): item is GlpiUserCandidate => Boolean(item));
+      }
+    );
+    return candidates.filter(
+      (item): item is GlpiUserCandidate => item !== null
+    );
   }
 
   private dedupeCandidates(
@@ -606,6 +861,7 @@ export class GlpiClient {
       }
     }
 
+    const forcedDisplay = await this.getUserForcedDisplayFields();
     const buildParams = (
       criteriaList: GlpiSearchCriterion[]
     ): Array<[string, string]> => {
@@ -621,10 +877,9 @@ export class GlpiClient {
         ]);
         params.push([`criteria[${index}][value]`, item.value]);
       });
-      params.push(["forcedisplay[0]", "2"]);
-      params.push(["forcedisplay[1]", "1"]);
-      params.push(["forcedisplay[2]", "9"]);
-      params.push(["forcedisplay[3]", "34"]);
+      forcedDisplay.forEach((fieldId, index) => {
+        params.push([`forcedisplay[${index}]`, fieldId]);
+      });
       params.push(["range", range]);
       return params;
     };
@@ -684,7 +939,7 @@ export class GlpiClient {
   }
 
   private tokenizeName(value: string): string[] {
-    return value
+    return this.normalizeNameValue(value)
       .split(/\s+/)
       .map((part) => part.trim())
       .filter(Boolean);
@@ -1139,15 +1394,27 @@ export class GlpiClient {
     }
 
     try {
+      const results = await this.searchUsersByText(trimmed, primaryRange);
+      const filtered = this.filterCandidatesByName(results, trimmed);
+      if (filtered.length > 0) {
+        return this.dedupeCandidates(filtered);
+      }
+    } catch {
+      // Ignore searchText fallback errors.
+    }
+
+    try {
       const query = this.buildQueryString([["searchText", trimmed]]);
       const response = await this.requestForSearch(`User?${query}`, {
         method: "GET",
       });
       const results = this.parseUserCandidates(response);
       const filtered = this.filterCandidatesByName(results, trimmed);
-      return this.dedupeCandidates(filtered);
+      if (filtered.length > 0) {
+        return this.dedupeCandidates(filtered);
+      }
     } catch {
-      // Ignore searchText fallback errors.
+      // Ignore legacy searchText fallback errors.
     }
 
     const scanned = await this.scanUsersByName(trimmed);

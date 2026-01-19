@@ -11,6 +11,15 @@ export type GlpiUserCandidate = {
   login: string;
   firstname: string;
   realname: string;
+  email?: string;
+  phone?: string;
+  mobile?: string;
+  category?: string;
+  title?: string;
+  entity?: string;
+  location?: string;
+  floor?: string;
+  dni?: string;
 };
 
 export type IncomingMessage = {

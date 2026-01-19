@@ -850,6 +850,39 @@ export class TicketFlow {
         if (!session.draft.nombre) {
           session.draft.nombre = name;
         }
+        if (!session.draft.dni) {
+          const dni = extractDni(candidate.dni || "") || extractDni(candidate.login || "");
+          if (dni) {
+            session.draft.dni = dni;
+          }
+        }
+        if (!session.draft.correo && candidate.email) {
+          session.draft.correo = candidate.email;
+        }
+        if (!session.draft.celular) {
+          const mobile = candidate.mobile?.trim();
+          const phone = candidate.phone?.trim();
+          if (mobile) {
+            session.draft.celular = mobile;
+          } else if (phone) {
+            session.draft.celular = phone;
+          }
+        }
+        if (!session.draft.cargo) {
+          const cargo = candidate.category?.trim() || candidate.title?.trim();
+          if (cargo) {
+            session.draft.cargo = cargo;
+          }
+        }
+        if (!session.draft.dependencia) {
+          const dependencia = candidate.location?.trim() || candidate.entity?.trim();
+          if (dependencia) {
+            session.draft.dependencia = dependencia;
+          }
+        }
+        if (!session.draft.piso && candidate.floor) {
+          session.draft.piso = candidate.floor;
+        }
       }
       return;
     }
