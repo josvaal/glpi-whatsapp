@@ -29,6 +29,7 @@ type TicketSession = {
 
 type TicketFlowOptions = {
   defaultCategoryId: number;
+  defaultCategoryName?: string;
   technicianByPhone: Record<string, string>;
 };
 
@@ -479,6 +480,9 @@ export class TicketFlow {
       rawText: parsed.rawText,
       isComplete: Boolean(mergedSolicitante && mergedProblema),
     };
+    if (!session.draft.categoria && this.options.defaultCategoryName) {
+      session.draft.categoria = this.options.defaultCategoryName;
+    }
     session.awaitingText = false;
 
     if (!session.draft.isComplete) {

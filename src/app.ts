@@ -1,3 +1,4 @@
+import { loadCategories } from "./categories";
 import { loadConfig } from "./config";
 import { GlpiClient } from "./glpi";
 import { TicketFlow } from "./ticket-flow";
@@ -6,8 +7,14 @@ import { startWhatsAppListener } from "./whatsapp";
 export async function run(): Promise<void> {
   const config = loadConfig();
   const glpi = new GlpiClient(config.glpi);
+  const categories = loadCategories(config.categoriesPath);
+  const defaultCategoryName =
+    categories.find(
+      (entry) => entry.glpiCategoryId === config.defaultCategoryId
+    )?.category ?? undefined;
   const flow = new TicketFlow(glpi, {
     defaultCategoryId: config.defaultCategoryId,
+    defaultCategoryName,
     technicianByPhone: config.technicianByPhone,
   });
 
