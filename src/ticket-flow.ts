@@ -580,10 +580,6 @@ export class TicketFlow {
       return false;
     }
 
-    const problem = session.draft.problema || "";
-    const title = buildTicketTitle(problem);
-    const content = buildTicketContent(session.draft);
-
     const requesterValue = session.draft.solicitante || "";
     const requesterId = await this.resolveUserId(
       message,
@@ -614,6 +610,9 @@ export class TicketFlow {
     }
 
     try {
+      const problem = session.draft.problema || "";
+      const title = buildTicketTitle(problem);
+      const content = buildTicketContent(session.draft);
       const ticketId = await this.glpi.createTicket({
         title,
         content,
