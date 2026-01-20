@@ -73,6 +73,10 @@ export function startWhatsAppListener(
     );
   }
 
+  function shouldIgnoreMessageType(type: string | null | undefined): boolean {
+    return type === "sticker";
+  }
+
   function delay(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
@@ -252,6 +256,9 @@ export function startWhatsAppListener(
       return;
     }
     if (!shouldProcessMessage(message)) {
+      return;
+    }
+    if (shouldIgnoreMessageType(message.type)) {
       return;
     }
 

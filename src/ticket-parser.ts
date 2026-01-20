@@ -86,6 +86,16 @@ function splitByDash(value: string): string[] {
     .filter((part) => part.length > 0);
 }
 
+const SPACED_DASH_REGEX = /\s+[-\u2013\u2014]\s+/;
+const DASH_CHAR_REGEX = /[-\u2013\u2014]/g;
+
+function splitBySpacedDash(value: string): string[] {
+  return value
+    .split(SPACED_DASH_REGEX)
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0);
+}
+
 function looksLikeDni(value: string): boolean {
   const digits = value.replace(/\D/g, "");
   return digits.length === 8;
@@ -277,7 +287,14 @@ export function parseLooseDashTemplate(body: string): TicketDraft | null {
   if (body.includes("=>")) {
     return null;
   }
-  const parts = splitByDash(body);
+  const spacedParts = splitBySpacedDash(body);
+  let parts = spacedParts;
+  if (parts.length !== 2) {
+    const dashCount = (body.match(DASH_CHAR_REGEX) || []).length;
+    if (dashCount === 1) {
+      parts = splitByDash(body);
+    }
+  }
   if (parts.length !== 2) {
     return null;
   }
