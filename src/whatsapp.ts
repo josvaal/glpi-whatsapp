@@ -1,6 +1,6 @@
 import qrcode from "qrcode-terminal";
 import { Client, LocalAuth, Poll } from "whatsapp-web.js";
-import type { Chat, Contact, Message, PollVote } from "whatsapp-web.js";
+import type { Contact, Message, PollVote } from "whatsapp-web.js";
 
 import type { WhatsappConfig } from "./config";
 import type { IncomingMessage, IncomingPollVote, MediaPayload } from "./types";
@@ -31,14 +31,37 @@ export function startWhatsAppListener(
     puppeteerConfig.executablePath = config.executablePath;
   }
 
+  const authOptions: { dataPath: string; clientId?: string } = {
+    dataPath: config.sessionDir,
+  };
+  if (config.clientId) {
+    authOptions.clientId = config.clientId;
+  }
+
   const client = new Client({
-    authStrategy: new LocalAuth({ dataPath: config.sessionDir }),
+    authStrategy: new LocalAuth(authOptions),
     puppeteer: puppeteerConfig,
+    takeoverOnConflict: true,
+    takeoverTimeoutMs: 15000,
+    webVersionCache: { type: "none" },
+    authTimeoutMs: 60000,
+    bypassCSP: true,
   });
 
   let activeGroupId: string | null = null;
   let selfId: string | null = null;
   let selfNumber: string | null = null;
+  let readyHandled = false;
+  let readyHandling = false;
+  let readyWatchdog: NodeJS.Timeout | null = null;
+  let readyStartedAt = 0;
+  let lastKnownState: string | null = null;
+  let conflictTakeoverAttempted = false;
+  let watchdogRunning = false;
+  let restartAttempts = 0;
+  let eventHooksReady = false;
+  let eventHookAttempts = 0;
+  let eventHookRetryTimer: NodeJS.Timeout | null = null;
   const seenMessageIds = new Set<string>();
   const ignoredMessageIds = new Set<string>();
   const outgoingBodies = new Map<string, number>();
@@ -47,9 +70,133 @@ export function startWhatsAppListener(
     { label: string; number: string | null }
   >();
 
-  async function findGroupByName(name: string): Promise<Chat | null> {
-    const chats: Chat[] = await client.getChats();
-    return chats.find((chat: Chat) => chat.isGroup && chat.name === name) || null;
+  function normalizeGroupName(value: string): string {
+    return value.trim().replace(/\s+/g, " ").toLowerCase();
+  }
+
+  type RawChat = { id: string; name: string; isGroup: boolean };
+
+  async function getRawChats(): Promise<RawChat[]> {
+    const page = (
+      client as unknown as {
+        pupPage?: {
+          evaluate: <T>(fn: () => T | Promise<T>) => Promise<T>;
+        };
+      }
+    ).pupPage;
+    if (!page?.evaluate) {
+      throw new Error("No se pudo acceder al navegador para leer chats.");
+    }
+    return await page.evaluate(() => {
+      const store = (window as unknown as {
+        Store?: { Chat?: { getModelsArray?: () => unknown[] } };
+      }).Store;
+      const models = store?.Chat?.getModelsArray?.() || [];
+      return models
+        .map((chat) => {
+          const model = chat as {
+            id?: { _serialized?: string };
+            name?: string;
+            formattedTitle?: string;
+            groupMetadata?: { subject?: string };
+            displayName?: string;
+            pushname?: string;
+            isGroup?: boolean;
+          };
+          const id = model.id?._serialized || "";
+          const name =
+            model.name ||
+            model.formattedTitle ||
+            model.groupMetadata?.subject ||
+            model.displayName ||
+            model.pushname ||
+            "";
+          const isGroup = Boolean(model.isGroup) || id.endsWith("@g.us");
+          return { id, name, isGroup };
+        })
+        .filter((entry) => entry.id);
+    });
+  }
+
+  async function getRawChatsWithRetry(
+    attempts = 8,
+    delayMs = 1500
+  ): Promise<RawChat[]> {
+    let lastError: unknown = null;
+    for (let attempt = 1; attempt <= attempts; attempt += 1) {
+      try {
+        return await getRawChats();
+      } catch (err) {
+        lastError = err;
+        const messageText = err instanceof Error ? err.message : String(err);
+        if (attempt === 1 || attempt === attempts) {
+          console.warn(
+            `No se pudieron cargar chats (intento ${attempt}/${attempts}): ${messageText}`
+          );
+        }
+        if (attempt < attempts) {
+          await delay(delayMs);
+        }
+      }
+    }
+    throw lastError instanceof Error
+      ? lastError
+      : new Error(String(lastError || "Error desconocido al cargar chats."));
+  }
+
+  async function listGroupNames(
+    limit = 20
+  ): Promise<{ total: number; names: string[] }> {
+    const chats = await getRawChatsWithRetry();
+    const groupNames = chats
+      .filter((chat) => chat.isGroup)
+      .map((chat) => chat.name)
+      .filter((name) => name && name.trim().length > 0);
+    const names = groupNames.slice(0, limit);
+    return { total: groupNames.length, names };
+  }
+
+  async function findGroupByName(name: string): Promise<RawChat | null> {
+    const chats = await getRawChatsWithRetry();
+    const groups = chats.filter((chat) => chat.isGroup);
+    const exact =
+      groups.find((chat) => chat.name === name) || null;
+    if (exact) {
+      return exact;
+    }
+    const normalizedTarget = normalizeGroupName(name);
+    const normalizedMatches = groups.filter(
+      (chat) => normalizeGroupName(chat.name) === normalizedTarget
+    );
+    if (normalizedMatches.length === 1) {
+      console.warn(
+        `Nombre de grupo coincide por normalizacion. Usando '${normalizedMatches[0].name}'.`
+      );
+      return normalizedMatches[0];
+    }
+    if (normalizedMatches.length > 1) {
+      console.error(
+        `Se encontraron multiples grupos con nombre similar a '${name}'.`
+      );
+    }
+    return null;
+  }
+
+  async function findGroupByNameWithRetry(
+    name: string,
+    attempts = 20,
+    delayMs = 1500
+  ): Promise<RawChat | null> {
+    for (let attempt = 1; attempt <= attempts; attempt += 1) {
+      const group = await findGroupByName(name);
+      if (group) {
+        return group;
+      }
+      if (attempt < attempts) {
+        await delay(delayMs);
+      }
+    }
+    return null;
   }
 
   function formatSender(contact: Contact): string {
@@ -438,30 +585,156 @@ export function startWhatsAppListener(
 
   client.on("authenticated", () => {
     console.log("Autenticado.");
+    readyHandled = false;
+    conflictTakeoverAttempted = false;
+    eventHooksReady = false;
+    eventHookAttempts = 0;
+    if (eventHookRetryTimer) {
+      clearTimeout(eventHookRetryTimer);
+      eventHookRetryTimer = null;
+    }
+    startReadyWatchdog();
   });
 
   client.on("auth_failure", (msg: string) => {
     console.error(`Fallo de autenticacion: ${msg}`);
   });
 
-  client.on("ready", async () => {
-    console.log("Sesion iniciada.");
+  client.on("change_state", (state: string) => {
+    console.log(`Estado WA: ${state}`);
+  });
+
+  client.on("loading_screen", (percent: string, message: string) => {
+    console.log(`Cargando: ${percent}% ${message}`);
+  });
+
+  async function isStoreReady(): Promise<boolean> {
+    const page = (
+      client as unknown as {
+        pupPage?: {
+          evaluate: (fn: () => boolean | Promise<boolean>) => Promise<boolean>;
+        };
+      }
+    ).pupPage;
+    if (!page?.evaluate) {
+      return false;
+    }
     try {
-      const group = await findGroupByName(config.groupName);
+      return await page.evaluate(() => {
+        const store = (window as unknown as {
+          Store?: { Chat?: { getModelsArray?: () => unknown[] } };
+        }).Store;
+        return Boolean(store?.Chat?.getModelsArray);
+      });
+    } catch {
+      return false;
+    }
+  }
+
+  async function waitForStore(timeoutMs = 30000): Promise<void> {
+    const page = (
+      client as unknown as {
+        pupPage?: {
+          waitForFunction: (fn: string, options: { timeout: number }) => Promise<void>;
+        };
+      }
+    ).pupPage;
+    if (!page?.waitForFunction) {
+      return;
+    }
+    try {
+      await page.waitForFunction(
+        "window.Store && window.Store.Chat && window.Store.Chat.getModelsArray",
+        { timeout: timeoutMs }
+      );
+    } catch {
+      // ignore and let retries handle it
+    }
+  }
+
+  async function waitForStoreModules(timeoutMs = 60000): Promise<boolean> {
+    const page = (
+      client as unknown as {
+        pupPage?: {
+          waitForFunction: (fn: string, options: { timeout: number }) => Promise<void>;
+        };
+      }
+    ).pupPage;
+    if (!page?.waitForFunction) {
+      return false;
+    }
+    try {
+      await page.waitForFunction(
+        "window.Store && window.Store.Msg && window.Store.Chat && window.Store.AppState && window.Store.Conn",
+        { timeout: timeoutMs }
+      );
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async function handleReady(trigger: string): Promise<void> {
+    if (readyHandled || readyHandling) {
+      return;
+    }
+    readyHandling = true;
+    console.log("Sesion iniciada.");
+    if (trigger !== "ready") {
+      console.warn(`Ready por fallback (${trigger}).`);
+    }
+    readyHandled = true;
+    stopReadyWatchdog();
+    try {
+      await waitForStore();
+      await ensureEventHooks();
+      const group = await findGroupByNameWithRetry(config.groupName);
       if (!group) {
         console.error(`No se encontro el grupo '${config.groupName}'.`);
         console.error("Verifica el nombre exacto en el archivo .env.");
+        try {
+          const { total, names } = await listGroupNames();
+          if (total === 0) {
+            console.error("No se encontraron grupos en esta cuenta.");
+          } else {
+            console.error(
+              `Grupos encontrados (${total}). Algunos: ${names.join(", ")}`
+            );
+          }
+        } catch (err) {
+          const messageText = err instanceof Error ? err.message : String(err);
+          console.error(`No se pudieron listar los grupos: ${messageText}`);
+        }
         process.exit(1);
       }
-      activeGroupId = group.id._serialized;
-      selfId = client.info?.wid?._serialized ?? null;
-      selfNumber = normalizePhone(client.info?.wid?.user ?? null);
-      console.log(`Escuchando mensajes entrantes del grupo: ${group.name}`);
+      activeGroupId = group.id;
+      const storedSelfId = client.info?.wid?._serialized ?? null;
+      if (storedSelfId) {
+        selfId = storedSelfId;
+        selfNumber = normalizePhone(client.info?.wid?.user ?? null);
+      } else {
+        const fallbackSelf = await getSelfInfoFromStore();
+        selfId = fallbackSelf?.id ?? null;
+        selfNumber = fallbackSelf?.number ?? null;
+      }
+      console.log(
+        `Escuchando mensajes entrantes del grupo: ${group.name || group.id}`
+      );
     } catch (err) {
       const messageText = err instanceof Error ? err.message : String(err);
       console.error(`Error al buscar grupo: ${messageText}`);
       process.exit(1);
+    } finally {
+      readyHandling = false;
     }
+  }
+
+  client.on("ready", () => {
+    if (readyHandled) {
+      console.warn("Evento 'ready' duplicado. Se ignora.");
+      return;
+    }
+    void handleReady("ready");
   });
 
   client.on("message", (message: Message) => {
@@ -486,6 +759,14 @@ export function startWhatsAppListener(
 
   client.on("disconnected", (reason: string) => {
     console.log(`Cliente desconectado: ${reason}`);
+    readyHandled = false;
+    eventHooksReady = false;
+    eventHookAttempts = 0;
+    if (eventHookRetryTimer) {
+      clearTimeout(eventHookRetryTimer);
+      eventHookRetryTimer = null;
+    }
+    stopReadyWatchdog();
   });
 
   process.on("SIGINT", async () => {
@@ -497,4 +778,199 @@ export function startWhatsAppListener(
   });
 
   client.initialize();
+
+  function stopReadyWatchdog(): void {
+    if (readyWatchdog) {
+      clearInterval(readyWatchdog);
+      readyWatchdog = null;
+    }
+  }
+
+  async function getStateSafe(): Promise<string | null> {
+    try {
+      return await client.getState();
+    } catch {
+      return null;
+    }
+  }
+
+  async function forceTakeover(): Promise<void> {
+    const page = (client as unknown as { pupPage?: { evaluate: (fn: () => void) => Promise<void> } })
+      .pupPage;
+    if (!page?.evaluate) {
+      console.warn("No se pudo acceder al navegador para tomar control.");
+      return;
+    }
+    try {
+      await page.evaluate(() => {
+        const store = (window as unknown as {
+          Store?: { AppState?: { takeover?: () => void } };
+        }).Store;
+        if (store?.AppState?.takeover) {
+          store.AppState.takeover();
+        }
+      });
+      console.warn("Se envio solicitud de takeover a WhatsApp Web.");
+    } catch (err) {
+      const messageText = err instanceof Error ? err.message : String(err);
+      console.warn(`No se pudo ejecutar takeover: ${messageText}`);
+    }
+  }
+
+  async function ensureEventHooks(): Promise<void> {
+    if (eventHooksReady) {
+      return;
+    }
+    eventHookAttempts += 1;
+    const internal = client as unknown as {
+      pupPage?: {
+        evaluate: (fn: () => unknown | Promise<unknown>) => Promise<unknown>;
+      };
+      attachEventListeners?: () => Promise<void>;
+    };
+    if (!internal.pupPage?.evaluate) {
+      console.warn("No se pudo acceder al navegador para activar eventos.");
+      return;
+    }
+    const storeReady = await waitForStoreModules();
+    if (!storeReady) {
+      console.warn("Store aun no esta listo para enganchar eventos.");
+      scheduleEventHookRetry();
+      return;
+    }
+    const hasWWebJS = await internal.pupPage.evaluate(() =>
+      Boolean((window as unknown as { WWebJS?: unknown }).WWebJS)
+    );
+    if (!hasWWebJS) {
+      try {
+        const { LoadUtils } = require("whatsapp-web.js/src/util/Injected/Utils") as {
+          LoadUtils: () => void;
+        };
+        await internal.pupPage.evaluate(LoadUtils);
+      } catch (err) {
+        const messageText = err instanceof Error ? err.message : String(err);
+        console.warn(`No se pudo cargar WWebJS Utils: ${messageText}`);
+      }
+    }
+    if (typeof internal.attachEventListeners === "function") {
+      try {
+        await internal.attachEventListeners();
+        eventHooksReady = true;
+        console.log("Hooks de eventos activados.");
+      } catch (err) {
+        const messageText = err instanceof Error ? err.message : String(err);
+        console.warn(`No se pudieron activar eventos: ${messageText}`);
+        scheduleEventHookRetry();
+      }
+    } else {
+      console.warn("attachEventListeners no esta disponible en el cliente.");
+    }
+  }
+
+  function scheduleEventHookRetry(): void {
+    if (eventHooksReady || eventHookAttempts >= 5) {
+      return;
+    }
+    if (eventHookRetryTimer) {
+      clearTimeout(eventHookRetryTimer);
+    }
+    eventHookRetryTimer = setTimeout(() => {
+      void ensureEventHooks();
+    }, 5000);
+  }
+
+  async function getSelfInfoFromStore(): Promise<{ id: string; number: string | null } | null> {
+    const page = (
+      client as unknown as {
+        pupPage?: {
+          evaluate: <T>(fn: () => T | Promise<T>) => Promise<T>;
+        };
+      }
+    ).pupPage;
+    if (!page?.evaluate) {
+      return null;
+    }
+    try {
+      return await page.evaluate(() => {
+        const store = (window as unknown as {
+          Store?: {
+            User?: {
+              getMaybeMePnUser?: () => { _serialized?: string; user?: string } | null;
+              getMaybeMeLidUser?: () => { _serialized?: string; user?: string } | null;
+            };
+          };
+        }).Store;
+        const wid =
+          store?.User?.getMaybeMePnUser?.() ||
+          store?.User?.getMaybeMeLidUser?.() ||
+          null;
+        if (!wid) {
+          return null;
+        }
+        const id = wid._serialized || "";
+        const number = wid.user || null;
+        return id ? { id, number } : null;
+      });
+    } catch {
+      return null;
+    }
+  }
+
+  function startReadyWatchdog(): void {
+    stopReadyWatchdog();
+    readyStartedAt = Date.now();
+    lastKnownState = null;
+    readyWatchdog = setInterval(() => {
+      if (watchdogRunning) {
+        return;
+      }
+      watchdogRunning = true;
+      void (async () => {
+        try {
+          if (readyHandled) {
+            stopReadyWatchdog();
+            return;
+          }
+          const state = await getStateSafe();
+          if (state && state !== lastKnownState) {
+            lastKnownState = state;
+            console.log(`Estado WA (esperando ready): ${state}`);
+          }
+          if (!readyHandled && await isStoreReady()) {
+            console.warn("Store detectado antes de 'ready'. Usando fallback.");
+            await handleReady("store");
+            return;
+          }
+          if (state === "CONFLICT" && !conflictTakeoverAttempted) {
+            conflictTakeoverAttempted = true;
+            console.warn("Conflicto detectado. Intentando tomar control...");
+            await forceTakeover();
+          }
+          if (Date.now() - readyStartedAt > 120_000) {
+            if (restartAttempts < 1) {
+              restartAttempts += 1;
+              console.error(
+                "Tiempo de espera agotado esperando 'ready'. Reiniciando cliente..."
+              );
+              try {
+                await client.destroy();
+              } catch {
+                // ignore destroy errors
+              }
+              await delay(2000);
+              client.initialize();
+              stopReadyWatchdog();
+            } else {
+              console.error(
+                "Tiempo de espera agotado esperando 'ready'. Reinicia el proceso o borra la sesion."
+              );
+              stopReadyWatchdog();
+            }
+          }
+        } finally {
+          watchdogRunning = false;
+        }
+      })();
+    }, 5000);
+  }
 }

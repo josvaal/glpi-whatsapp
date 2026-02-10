@@ -10,6 +10,7 @@ export type WhatsappConfig = {
   sessionDir: string;
   headless: boolean;
   executablePath?: string;
+  clientId?: string;
 };
 
 export type GlpiConfig = {
@@ -95,6 +96,7 @@ export function loadConfig(): AppConfig {
     process.env.WHATSAPP_PUPPETEER_EXECUTABLE_PATH ||
     process.env.PUPPETEER_EXECUTABLE_PATH ||
     undefined;
+  const clientId = (process.env.WHATSAPP_CLIENT_ID || "").trim() || undefined;
 
   const defaultCategoriesPath = path.join(process.cwd(), "categories.json");
   const envCategoriesPath =
@@ -158,6 +160,7 @@ export function loadConfig(): AppConfig {
       sessionDir,
       headless,
       executablePath,
+      clientId,
     },
     glpi: {
       baseUrl: glpiBaseUrl,
