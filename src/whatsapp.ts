@@ -1,6 +1,16 @@
 import qrcode from "qrcode-terminal";
-import { Client, LocalAuth, Poll } from "whatsapp-web.js";
-import type { Contact, Message, PollVote } from "whatsapp-web.js";
+import makeWASocket, {
+  DisconnectReason,
+  downloadContentFromMessage,
+  fetchLatestBaileysVersion,
+  getContentType,
+  jidNormalizedUser,
+  proto,
+  useMultiFileAuthState,
+  type WAMessage,
+  type WASocket,
+} from "@whiskeysockets/baileys";
+import pino from "pino";
 
 import type { WhatsappConfig } from "./config";
 import type { IncomingMessage, IncomingPollVote, MediaPayload } from "./types";
@@ -8,969 +18,497 @@ import type { IncomingMessage, IncomingPollVote, MediaPayload } from "./types";
 export type MessageHandler = (message: IncomingMessage) => Promise<void>;
 export type PollVoteHandler = (vote: IncomingPollVote) => Promise<void>;
 
+type RawGroup = { id: string; name: string };
+type MediaContent =
+  | proto.Message.IImageMessage
+  | proto.Message.IVideoMessage
+  | proto.Message.IAudioMessage
+  | proto.Message.IDocumentMessage;
+
 export function startWhatsAppListener(
   config: WhatsappConfig,
   handler: MessageHandler,
   pollVoteHandler?: PollVoteHandler
 ): void {
-  const puppeteerConfig: {
-    headless: boolean;
-    args: string[];
-    executablePath?: string;
-  } = {
-    headless: config.headless,
-    args: [
-      "--no-sandbox",
-      "--disable-setuid-sandbox",
-      "--disable-dev-shm-usage",
-      "--disable-gpu",
-    ],
-  };
+  void start(config, handler, pollVoteHandler);
+}
 
-  if (config.executablePath) {
-    puppeteerConfig.executablePath = config.executablePath;
-  }
-
-  const authOptions: { dataPath: string; clientId?: string } = {
-    dataPath: config.sessionDir,
-  };
-  if (config.clientId) {
-    authOptions.clientId = config.clientId;
-  }
-
-  const client = new Client({
-    authStrategy: new LocalAuth(authOptions),
-    puppeteer: puppeteerConfig,
-    takeoverOnConflict: true,
-    takeoverTimeoutMs: 15000,
-    webVersionCache: { type: "none" },
-    authTimeoutMs: 60000,
-    bypassCSP: true,
-  });
-
+async function start(
+  config: WhatsappConfig,
+  handler: MessageHandler,
+  pollVoteHandler?: PollVoteHandler
+): Promise<void> {
+  const { state, saveCreds } = await useMultiFileAuthState(config.sessionDir);
+  const logger = pino({ level: "silent" });
   let activeGroupId: string | null = null;
   let selfId: string | null = null;
   let selfNumber: string | null = null;
-  let readyHandled = false;
-  let readyHandling = false;
-  let readyWatchdog: NodeJS.Timeout | null = null;
-  let readyStartedAt = 0;
-  let lastKnownState: string | null = null;
-  let conflictTakeoverAttempted = false;
-  let watchdogRunning = false;
-  let restartAttempts = 0;
-  let eventHooksReady = false;
-  let eventHookAttempts = 0;
-  let eventHookRetryTimer: NodeJS.Timeout | null = null;
   const seenMessageIds = new Set<string>();
   const ignoredMessageIds = new Set<string>();
   const outgoingBodies = new Map<string, number>();
-  const senderInfoCache = new Map<
-    string,
-    { label: string; number: string | null }
-  >();
 
-  function normalizeGroupName(value: string): string {
-    return value.trim().replace(/\s+/g, " ").toLowerCase();
-  }
+  let sock: WASocket | null = null;
+  let reconnecting = false;
 
-  type RawChat = { id: string; name: string; isGroup: boolean };
-
-  async function getRawChats(): Promise<RawChat[]> {
-    const page = (
-      client as unknown as {
-        pupPage?: {
-          evaluate: <T>(fn: () => T | Promise<T>) => Promise<T>;
-        };
-      }
-    ).pupPage;
-    if (!page?.evaluate) {
-      throw new Error("No se pudo acceder al navegador para leer chats.");
-    }
-    return await page.evaluate(() => {
-      const store = (window as unknown as {
-        Store?: { Chat?: { getModelsArray?: () => unknown[] } };
-      }).Store;
-      const models = store?.Chat?.getModelsArray?.() || [];
-      return models
-        .map((chat) => {
-          const model = chat as {
-            id?: { _serialized?: string };
-            name?: string;
-            formattedTitle?: string;
-            groupMetadata?: { subject?: string };
-            displayName?: string;
-            pushname?: string;
-            isGroup?: boolean;
-          };
-          const id = model.id?._serialized || "";
-          const name =
-            model.name ||
-            model.formattedTitle ||
-            model.groupMetadata?.subject ||
-            model.displayName ||
-            model.pushname ||
-            "";
-          const isGroup = Boolean(model.isGroup) || id.endsWith("@g.us");
-          return { id, name, isGroup };
-        })
-        .filter((entry) => entry.id);
-    });
-  }
-
-  async function getRawChatsWithRetry(
-    attempts = 8,
-    delayMs = 1500
-  ): Promise<RawChat[]> {
-    let lastError: unknown = null;
-    for (let attempt = 1; attempt <= attempts; attempt += 1) {
-      try {
-        return await getRawChats();
-      } catch (err) {
-        lastError = err;
-        const messageText = err instanceof Error ? err.message : String(err);
-        if (attempt === 1 || attempt === attempts) {
-          console.warn(
-            `No se pudieron cargar chats (intento ${attempt}/${attempts}): ${messageText}`
-          );
-        }
-        if (attempt < attempts) {
-          await delay(delayMs);
-        }
-      }
-    }
-    throw lastError instanceof Error
-      ? lastError
-      : new Error(String(lastError || "Error desconocido al cargar chats."));
-  }
-
-  async function listGroupNames(
-    limit = 20
-  ): Promise<{ total: number; names: string[] }> {
-    const chats = await getRawChatsWithRetry();
-    const groupNames = chats
-      .filter((chat) => chat.isGroup)
-      .map((chat) => chat.name)
-      .filter((name) => name && name.trim().length > 0);
-    const names = groupNames.slice(0, limit);
-    return { total: groupNames.length, names };
-  }
-
-  async function findGroupByName(name: string): Promise<RawChat | null> {
-    const chats = await getRawChatsWithRetry();
-    const groups = chats.filter((chat) => chat.isGroup);
-    const exact =
-      groups.find((chat) => chat.name === name) || null;
-    if (exact) {
-      return exact;
-    }
-    const normalizedTarget = normalizeGroupName(name);
-    const normalizedMatches = groups.filter(
-      (chat) => normalizeGroupName(chat.name) === normalizedTarget
-    );
-    if (normalizedMatches.length === 1) {
-      console.warn(
-        `Nombre de grupo coincide por normalizacion. Usando '${normalizedMatches[0].name}'.`
-      );
-      return normalizedMatches[0];
-    }
-    if (normalizedMatches.length > 1) {
-      console.error(
-        `Se encontraron multiples grupos con nombre similar a '${name}'.`
-      );
-    }
-    return null;
-  }
-
-  async function findGroupByNameWithRetry(
-    name: string,
-    attempts = 20,
-    delayMs = 1500
-  ): Promise<RawChat | null> {
-    for (let attempt = 1; attempt <= attempts; attempt += 1) {
-      const group = await findGroupByName(name);
-      if (group) {
-        return group;
-      }
-      if (attempt < attempts) {
-        await delay(delayMs);
-      }
-    }
-    return null;
-  }
-
-  function formatSender(contact: Contact): string {
-    return contact.pushname || contact.name || contact.number || "Desconocido";
-  }
-
-  function normalizePhone(value: string | null | undefined): string | null {
-    if (!value) {
-      return null;
-    }
-    const digits = value.replace(/\D+/g, "");
-    return digits || null;
-  }
-
-  function isLikelyMediaType(type: string | null | undefined): boolean {
-    if (!type) {
-      return false;
-    }
-    return ["image", "video", "audio", "ptt", "document", "sticker", "gif"].includes(
-      type
-    );
-  }
-
-  function shouldIgnoreMessageType(type: string | null | undefined): boolean {
-    return type === "sticker";
-  }
-
-  function delay(ms: number): Promise<void> {
-    return new Promise((resolve) => setTimeout(resolve, ms));
-  }
-
-  async function downloadMediaPayload(
-    message: Message,
-    attempts = 2,
-    delayMs = 750
-  ): Promise<MediaPayload | null> {
-    for (let attempt = 0; attempt < attempts; attempt += 1) {
-      try {
-        const media = await message.downloadMedia();
-        if (media) {
-          return {
-            data: media.data,
-            mimetype: media.mimetype,
-            filename: media.filename || null,
-          };
-        }
-      } catch (err) {
-        const messageText = err instanceof Error ? err.message : String(err);
-        console.warn(`No se pudo descargar media: ${messageText}`);
-      }
-      if (attempt < attempts - 1) {
-        await delay(delayMs);
-      }
-    }
-    return null;
-  }
-
-  function getMessageKey(message: Message): string {
-    if (message.id && message.id._serialized) {
-      return message.id._serialized;
-    }
-    const from = message.from || "";
-    const to = message.to || "";
-    const timestamp = message.timestamp || 0;
-    const body = message.body || "";
-    return `${from}_${to}_${timestamp}_${body}`;
-  }
-
-  function rememberOutgoingBody(body: string): void {
-    const trimmed = body.trim();
-    if (!trimmed) {
+  async function connect(): Promise<void> {
+    if (reconnecting) {
       return;
     }
-    outgoingBodies.set(trimmed, Date.now() + 30_000);
-  }
+    reconnecting = true;
 
-  function isOutgoingBody(body: string): boolean {
-    const trimmed = body.trim();
-    if (!trimmed) {
-      return false;
-    }
-    const expiresAt = outgoingBodies.get(trimmed);
-    if (!expiresAt) {
-      return false;
-    }
-    if (expiresAt <= Date.now()) {
-      outgoingBodies.delete(trimmed);
-      return false;
-    }
-    return true;
-  }
-
-  function shouldProcessMessage(message: Message): boolean {
-    const serializedId = message.id?._serialized;
-    if (serializedId && ignoredMessageIds.has(serializedId)) {
-      ignoredMessageIds.delete(serializedId);
-      return false;
-    }
-    if (message.fromMe && isOutgoingBody(message.body || "")) {
-      return false;
-    }
-    const key = getMessageKey(message);
-    if (seenMessageIds.has(key)) {
-      return false;
-    }
-    seenMessageIds.add(key);
-    return true;
-  }
-
-  function getChatIdFromMessage(message: Message): string | null {
-    if (message.fromMe) {
-      return message.to || null;
-    }
-    return message.from || null;
-  }
-
-  function getSenderIdFromMessage(message: Message): string | null {
-    if (message.author) {
-      return message.author;
-    }
-    if (message.fromMe) {
-      return selfId;
-    }
-    return message.from || null;
-  }
-
-  function normalizeContactId(senderId: string): string {
-    const atIndex = senderId.indexOf("@");
-    if (atIndex === -1) {
-      return senderId;
-    }
-    const userPart = senderId.slice(0, atIndex);
-    const domainPart = senderId.slice(atIndex + 1);
-    const cleanedUser = userPart.split(":")[0];
-    return `${cleanedUser}@${domainPart}`;
-  }
-
-  function extractNumber(senderId: string): string {
-    const normalized = normalizeContactId(senderId);
-    const atIndex = normalized.indexOf("@");
-    const userPart = atIndex > 0 ? normalized.slice(0, atIndex) : normalized;
-    const digits = userPart.replace(/\D+/g, "");
-    return digits || userPart;
-  }
-
-  function isGroupId(senderId: string): boolean {
-    return senderId.endsWith("@g.us");
-  }
-
-  async function getSenderInfo(
-    senderId: string | null,
-    fromMe: boolean
-  ): Promise<{ label: string; number: string | null }> {
-    if (!senderId) {
-      return { label: "Desconocido", number: null };
-    }
-    const normalizedId = normalizeContactId(senderId);
-    const cached = senderInfoCache.get(normalizedId);
-    if (cached) {
-      return cached;
-    }
-    const number = extractNumber(normalizedId);
-    let resolvedNumber = normalizePhone(number) || number || null;
-    if (fromMe && selfNumber) {
-      resolvedNumber = selfNumber;
-    }
-    let label = resolvedNumber || normalizedId;
-    if (isGroupId(normalizedId)) {
-      label = "Sistema";
-      const info = { label, number: null };
-      senderInfoCache.set(normalizedId, info);
-      return info;
-    }
+    let version: [number, number, number] | undefined;
     try {
-      const contact = await client.getContactById(normalizedId);
-      const name = formatSender(contact);
-      const contactNumber =
-        normalizePhone(contact.number) || normalizePhone(contact.id?.user);
-      if (contactNumber) {
-        resolvedNumber = contactNumber;
-      }
-      if (name) {
-        label =
-          resolvedNumber && name !== resolvedNumber
-            ? `${name} (${resolvedNumber})`
-            : name;
-      } else if (resolvedNumber) {
-        label = resolvedNumber;
-      }
+      const latest = await fetchLatestBaileysVersion();
+      version = latest.version;
     } catch {
-      // ignore lookup failures and fall back to number
-    }
-    const info = { label, number: resolvedNumber };
-    senderInfoCache.set(normalizedId, info);
-    return info;
-  }
-
-  async function handleMessage(message: Message): Promise<void> {
-    if (!activeGroupId) {
-      return;
-    }
-    const chatId = getChatIdFromMessage(message);
-    if (!chatId || chatId !== activeGroupId) {
-      return;
-    }
-    if (!shouldProcessMessage(message)) {
-      return;
-    }
-    if (shouldIgnoreMessageType(message.type)) {
-      return;
+      // ignore and let baileys pick a default
     }
 
-    const senderId = getSenderIdFromMessage(message);
-    const senderInfo = await getSenderInfo(senderId, message.fromMe);
-    const senderLabel = senderInfo.label;
-    let body = message.body || "";
-    const inferredHasMedia = message.hasMedia || isLikelyMediaType(message.type);
-    if (!body) {
-      if (inferredHasMedia) {
-        body = `[media:${message.type}]`;
-      } else if (message.type) {
-        body = `[${message.type}]`;
-      } else {
-        body = "[mensaje sin texto]";
+    sock = makeWASocket({
+      version,
+      auth: state,
+      printQRInTerminal: false,
+      syncFullHistory: false,
+      markOnlineOnConnect: false,
+      generateHighQualityLinkPreview: false,
+      logger,
+    });
+
+    sock.ev.on("creds.update", saveCreds);
+
+    sock.ev.on("connection.update", async (update) => {
+      const { connection, lastDisconnect, qr } = update;
+      if (qr) {
+        console.log("Escanea este QR con WhatsApp para iniciar sesion.");
+        qrcode.generate(qr, { small: true });
       }
-    }
-    const timestamp = new Date(message.timestamp * 1000);
 
-    try {
-      const senderNumber = senderInfo.number;
-      const incoming: IncomingMessage = {
-        body,
-        timestamp,
-        senderLabel,
-        senderId,
-        senderNumber,
-        chatId,
-        hasMedia: inferredHasMedia,
-        mediaType: message.type || null,
-        getMedia: async () => {
-          if (!inferredHasMedia) {
-            return null;
+      if (connection === "open") {
+        console.log("Autenticado.");
+        console.log("Sesion iniciada.");
+        selfId = sock?.user?.id ?? null;
+        selfNumber = normalizePhone(selfId ? extractNumber(selfId) : null);
+        activeGroupId = await findGroupByNameWithRetry(sock, config.groupName);
+        if (!activeGroupId) {
+          console.error(`No se encontro el grupo '${config.groupName}'.`);
+          console.error("Verifica el nombre exacto en el archivo .env.");
+          const groups = await listGroupsSafe(sock);
+          if (groups.length > 0) {
+            console.error(
+              `Grupos encontrados (${groups.length}). Algunos: ${groups
+                .slice(0, 20)
+                .map((g) => g.name)
+                .join(", ")}`
+            );
           }
-          return downloadMediaPayload(message);
-        },
-        reply: async (text: string) => {
-          try {
-            rememberOutgoingBody(text);
-            const sent = await client.sendMessage(chatId, text, {
-              sendSeen: false,
-            });
-            const sentId = sent?.id?._serialized;
+          process.exit(1);
+        }
+        console.log(
+          `Escuchando mensajes entrantes del grupo: ${await resolveGroupName(
+            sock,
+            activeGroupId
+          )}`
+        );
+      } else if (connection === "close") {
+        const statusCode =
+          (lastDisconnect?.error as { output?: { statusCode?: number } })
+            ?.output?.statusCode ?? null;
+        console.log(
+          `Cliente desconectado: ${statusCode ?? "desconocido"}`
+        );
+        if (statusCode !== DisconnectReason.loggedOut) {
+          setTimeout(() => {
+            reconnecting = false;
+            void connect();
+          }, 2000);
+        }
+      }
+    });
+
+    sock.ev.on("messages.upsert", async (upsert) => {
+      if (!sock || !activeGroupId) {
+        return;
+      }
+      for (const msg of upsert.messages) {
+        if (!msg.message) {
+          continue;
+        }
+        const chatId = msg.key.remoteJid || "";
+        if (chatId !== activeGroupId) {
+          continue;
+        }
+        if (!shouldProcessMessage(msg, ignoredMessageIds, outgoingBodies, seenMessageIds)) {
+          continue;
+        }
+
+        const content = unwrapMessage(msg.message);
+        if (!content) {
+          continue;
+        }
+        const summary = summarizeMessage(content);
+        if (summary.isSticker) {
+          continue;
+        }
+
+        const senderId = getSenderId(msg, selfId);
+        const senderNumber = normalizePhone(senderId ? extractNumber(senderId) : null);
+        const senderLabel = msg.pushName || senderNumber || "Desconocido";
+        const timestamp = new Date(getTimestampSeconds(msg) * 1000);
+        const body = summary.text || buildFallbackBody(summary);
+
+        const incoming: IncomingMessage = {
+          body,
+          timestamp,
+          senderLabel,
+          senderId,
+          senderNumber,
+          chatId,
+          hasMedia: summary.hasMedia,
+          mediaType: summary.mediaType,
+          getMedia: async () => {
+            if (!summary.hasMedia) {
+              return null;
+            }
+            return downloadMediaPayload(content);
+          },
+          reply: async (text: string) => {
+            if (!sock) {
+              return;
+            }
+            rememberOutgoingBody(outgoingBodies, text);
+            const sent = await sock.sendMessage(chatId, { text });
+            const sentId = sent?.key?.id;
             if (sentId) {
               ignoredMessageIds.add(sentId);
             }
-          } catch (err) {
-            const messageText = err instanceof Error ? err.message : String(err);
-            console.error(`No se pudo enviar respuesta: ${messageText}`);
-          }
-        },
-        react: async (emoji: string) => {
-          try {
-            await message.react(emoji);
-          } catch (err) {
-            const messageText = err instanceof Error ? err.message : String(err);
-            console.error(`No se pudo reaccionar al mensaje: ${messageText}`);
-          }
-        },
-        sendPoll: async (
-          title: string,
-          options: string[],
-          allowMultiple = false
-        ) => {
-          try {
-            const poll = new Poll(title, options, {
-              allowMultipleAnswers: allowMultiple,
-              messageSecret: undefined,
+          },
+          react: async (emoji: string) => {
+            if (!sock) {
+              return;
+            }
+            await sock.sendMessage(chatId, {
+              react: { text: emoji, key: msg.key },
             });
-            const sent = await client.sendMessage(chatId, poll, {
-              sendSeen: false,
+          },
+          sendPoll: async (
+            title: string,
+            options: string[],
+            allowMultiple = false
+          ) => {
+            if (!sock) {
+              return null;
+            }
+            const sent = await sock.sendMessage(chatId, {
+              poll: {
+                name: title,
+                values: options,
+                selectableCount: allowMultiple ? 0 : 1,
+              },
             });
-            const sentId = sent?.id?._serialized;
+            const sentId = sent?.key?.id;
             if (sentId) {
               ignoredMessageIds.add(sentId);
             }
             return sentId ?? null;
-          } catch (err) {
-            const messageText = err instanceof Error ? err.message : String(err);
-            console.error(`No se pudo enviar encuesta: ${messageText}`);
-            return null;
-          }
-        },
-      };
-      await handler(incoming);
-    } catch (err) {
-      const messageText = err instanceof Error ? err.message : String(err);
-      console.error(`Error al procesar mensaje: ${messageText}`);
-    }
-  }
+          },
+        };
 
-  async function handlePollVote(vote: PollVote): Promise<void> {
-    if (!pollVoteHandler || !activeGroupId) {
-      return;
-    }
-    const parentMessage = vote.parentMessage;
-    if (!parentMessage) {
-      return;
-    }
-    const chatId = getChatIdFromMessage(parentMessage);
-    if (!chatId || chatId !== activeGroupId) {
-      return;
-    }
-
-    const senderId = vote.voter || null;
-    const senderInfo = await getSenderInfo(senderId, senderId === selfId);
-    const selectedOptionIds = vote.selectedOptions
-      .map((option) => {
-        const localId = (option as { localId?: number }).localId;
-        return Number.isInteger(localId) ? localId : option.id;
-      })
-      .filter((value): value is number => Number.isInteger(value));
-    const selectedOptionNames = vote.selectedOptions
-      .map((option) => option.name)
-      .filter((name): name is string => Boolean(name));
-    if (selectedOptionIds.length === 0 && selectedOptionNames.length === 0) {
-      return;
-    }
-
-    const pollMessageId = parentMessage.id?._serialized || null;
-    const incomingVote: IncomingPollVote = {
-      chatId,
-      senderId,
-      senderNumber: senderInfo.number,
-      senderLabel: senderInfo.label,
-      pollMessageId,
-      selectedOptionIds,
-      selectedOptionNames,
-      timestamp: new Date(vote.interractedAtTs || Date.now()),
-      reply: async (text: string) => {
         try {
-          rememberOutgoingBody(text);
-          const sent = await client.sendMessage(chatId, text, {
-            sendSeen: false,
-          });
-          const sentId = sent?.id?._serialized;
-          if (sentId) {
-            ignoredMessageIds.add(sentId);
-          }
+          await handler(incoming);
         } catch (err) {
           const messageText = err instanceof Error ? err.message : String(err);
-          console.error(`No se pudo enviar respuesta: ${messageText}`);
+          console.error(`Error al procesar mensaje: ${messageText}`);
         }
-      },
-      sendPoll: async (
-        title: string,
-        options: string[],
-        allowMultiple = false
-      ) => {
-        try {
-          const poll = new Poll(title, options, {
-            allowMultipleAnswers: allowMultiple,
-            messageSecret: undefined,
-          });
-          const sent = await client.sendMessage(chatId, poll, {
-            sendSeen: false,
-          });
-          const sentId = sent?.id?._serialized;
-          if (sentId) {
-            ignoredMessageIds.add(sentId);
-          }
-          return sentId ?? null;
-        } catch (err) {
-          const messageText = err instanceof Error ? err.message : String(err);
-          console.error(`No se pudo enviar encuesta: ${messageText}`);
-          return null;
-        }
-      },
-    };
-    await pollVoteHandler(incomingVote);
-  }
-
-  client.on("qr", (qr: string) => {
-    console.log("Escanea este QR con WhatsApp para iniciar sesion.");
-    qrcode.generate(qr, { small: true });
-  });
-
-  client.on("authenticated", () => {
-    console.log("Autenticado.");
-    readyHandled = false;
-    conflictTakeoverAttempted = false;
-    eventHooksReady = false;
-    eventHookAttempts = 0;
-    if (eventHookRetryTimer) {
-      clearTimeout(eventHookRetryTimer);
-      eventHookRetryTimer = null;
-    }
-    startReadyWatchdog();
-  });
-
-  client.on("auth_failure", (msg: string) => {
-    console.error(`Fallo de autenticacion: ${msg}`);
-  });
-
-  client.on("change_state", (state: string) => {
-    console.log(`Estado WA: ${state}`);
-  });
-
-  client.on("loading_screen", (percent: string, message: string) => {
-    console.log(`Cargando: ${percent}% ${message}`);
-  });
-
-  async function isStoreReady(): Promise<boolean> {
-    const page = (
-      client as unknown as {
-        pupPage?: {
-          evaluate: (fn: () => boolean | Promise<boolean>) => Promise<boolean>;
-        };
       }
-    ).pupPage;
-    if (!page?.evaluate) {
-      return false;
-    }
-    try {
-      return await page.evaluate(() => {
-        const store = (window as unknown as {
-          Store?: { Chat?: { getModelsArray?: () => unknown[] } };
-        }).Store;
-        return Boolean(store?.Chat?.getModelsArray);
-      });
-    } catch {
-      return false;
-    }
-  }
-
-  async function waitForStore(timeoutMs = 30000): Promise<void> {
-    const page = (
-      client as unknown as {
-        pupPage?: {
-          waitForFunction: (fn: string, options: { timeout: number }) => Promise<void>;
-        };
-      }
-    ).pupPage;
-    if (!page?.waitForFunction) {
-      return;
-    }
-    try {
-      await page.waitForFunction(
-        "window.Store && window.Store.Chat && window.Store.Chat.getModelsArray",
-        { timeout: timeoutMs }
-      );
-    } catch {
-      // ignore and let retries handle it
-    }
-  }
-
-  async function waitForStoreModules(timeoutMs = 60000): Promise<boolean> {
-    const page = (
-      client as unknown as {
-        pupPage?: {
-          waitForFunction: (fn: string, options: { timeout: number }) => Promise<void>;
-        };
-      }
-    ).pupPage;
-    if (!page?.waitForFunction) {
-      return false;
-    }
-    try {
-      await page.waitForFunction(
-        "window.Store && window.Store.Msg && window.Store.Chat && window.Store.AppState && window.Store.Conn",
-        { timeout: timeoutMs }
-      );
-      return true;
-    } catch {
-      return false;
-    }
-  }
-
-  async function handleReady(trigger: string): Promise<void> {
-    if (readyHandled || readyHandling) {
-      return;
-    }
-    readyHandling = true;
-    console.log("Sesion iniciada.");
-    if (trigger !== "ready") {
-      console.warn(`Ready por fallback (${trigger}).`);
-    }
-    readyHandled = true;
-    stopReadyWatchdog();
-    try {
-      await waitForStore();
-      await ensureEventHooks();
-      const group = await findGroupByNameWithRetry(config.groupName);
-      if (!group) {
-        console.error(`No se encontro el grupo '${config.groupName}'.`);
-        console.error("Verifica el nombre exacto en el archivo .env.");
-        try {
-          const { total, names } = await listGroupNames();
-          if (total === 0) {
-            console.error("No se encontraron grupos en esta cuenta.");
-          } else {
-            console.error(
-              `Grupos encontrados (${total}). Algunos: ${names.join(", ")}`
-            );
-          }
-        } catch (err) {
-          const messageText = err instanceof Error ? err.message : String(err);
-          console.error(`No se pudieron listar los grupos: ${messageText}`);
-        }
-        process.exit(1);
-      }
-      activeGroupId = group.id;
-      const storedSelfId = client.info?.wid?._serialized ?? null;
-      if (storedSelfId) {
-        selfId = storedSelfId;
-        selfNumber = normalizePhone(client.info?.wid?.user ?? null);
-      } else {
-        const fallbackSelf = await getSelfInfoFromStore();
-        selfId = fallbackSelf?.id ?? null;
-        selfNumber = fallbackSelf?.number ?? null;
-      }
-      console.log(
-        `Escuchando mensajes entrantes del grupo: ${group.name || group.id}`
-      );
-    } catch (err) {
-      const messageText = err instanceof Error ? err.message : String(err);
-      console.error(`Error al buscar grupo: ${messageText}`);
-      process.exit(1);
-    } finally {
-      readyHandling = false;
-    }
-  }
-
-  client.on("ready", () => {
-    if (readyHandled) {
-      console.warn("Evento 'ready' duplicado. Se ignora.");
-      return;
-    }
-    void handleReady("ready");
-  });
-
-  client.on("message", (message: Message) => {
-    if (message.fromMe) {
-      return;
-    }
-    void handleMessage(message);
-  });
-
-  client.on("message_create", (message: Message) => {
-    if (!message.fromMe) {
-      return;
-    }
-    void handleMessage(message);
-  });
-
-  if (pollVoteHandler) {
-    client.on("vote_update", (vote: PollVote) => {
-      void handlePollVote(vote);
     });
-  }
 
-  client.on("disconnected", (reason: string) => {
-    console.log(`Cliente desconectado: ${reason}`);
-    readyHandled = false;
-    eventHooksReady = false;
-    eventHookAttempts = 0;
-    if (eventHookRetryTimer) {
-      clearTimeout(eventHookRetryTimer);
-      eventHookRetryTimer = null;
-    }
-    stopReadyWatchdog();
-  });
-
-  process.on("SIGINT", async () => {
-    try {
-      await client.destroy();
-    } finally {
-      process.exit(0);
-    }
-  });
-
-  client.initialize();
-
-  function stopReadyWatchdog(): void {
-    if (readyWatchdog) {
-      clearInterval(readyWatchdog);
-      readyWatchdog = null;
-    }
-  }
-
-  async function getStateSafe(): Promise<string | null> {
-    try {
-      return await client.getState();
-    } catch {
-      return null;
-    }
-  }
-
-  async function forceTakeover(): Promise<void> {
-    const page = (client as unknown as { pupPage?: { evaluate: (fn: () => void) => Promise<void> } })
-      .pupPage;
-    if (!page?.evaluate) {
-      console.warn("No se pudo acceder al navegador para tomar control.");
-      return;
-    }
-    try {
-      await page.evaluate(() => {
-        const store = (window as unknown as {
-          Store?: { AppState?: { takeover?: () => void } };
-        }).Store;
-        if (store?.AppState?.takeover) {
-          store.AppState.takeover();
-        }
-      });
-      console.warn("Se envio solicitud de takeover a WhatsApp Web.");
-    } catch (err) {
-      const messageText = err instanceof Error ? err.message : String(err);
-      console.warn(`No se pudo ejecutar takeover: ${messageText}`);
-    }
-  }
-
-  async function ensureEventHooks(): Promise<void> {
-    if (eventHooksReady) {
-      return;
-    }
-    eventHookAttempts += 1;
-    const internal = client as unknown as {
-      pupPage?: {
-        evaluate: (fn: () => unknown | Promise<unknown>) => Promise<unknown>;
-      };
-      attachEventListeners?: () => Promise<void>;
-    };
-    if (!internal.pupPage?.evaluate) {
-      console.warn("No se pudo acceder al navegador para activar eventos.");
-      return;
-    }
-    const storeReady = await waitForStoreModules();
-    if (!storeReady) {
-      console.warn("Store aun no esta listo para enganchar eventos.");
-      scheduleEventHookRetry();
-      return;
-    }
-    const hasWWebJS = await internal.pupPage.evaluate(() =>
-      Boolean((window as unknown as { WWebJS?: unknown }).WWebJS)
-    );
-    if (!hasWWebJS) {
-      try {
-        const { LoadUtils } = require("whatsapp-web.js/src/util/Injected/Utils") as {
-          LoadUtils: () => void;
-        };
-        await internal.pupPage.evaluate(LoadUtils);
-      } catch (err) {
-        const messageText = err instanceof Error ? err.message : String(err);
-        console.warn(`No se pudo cargar WWebJS Utils: ${messageText}`);
-      }
-    }
-    if (typeof internal.attachEventListeners === "function") {
-      try {
-        await internal.attachEventListeners();
-        eventHooksReady = true;
-        console.log("Hooks de eventos activados.");
-      } catch (err) {
-        const messageText = err instanceof Error ? err.message : String(err);
-        console.warn(`No se pudieron activar eventos: ${messageText}`);
-        scheduleEventHookRetry();
-      }
-    } else {
-      console.warn("attachEventListeners no esta disponible en el cliente.");
-    }
-  }
-
-  function scheduleEventHookRetry(): void {
-    if (eventHooksReady || eventHookAttempts >= 5) {
-      return;
-    }
-    if (eventHookRetryTimer) {
-      clearTimeout(eventHookRetryTimer);
-    }
-    eventHookRetryTimer = setTimeout(() => {
-      void ensureEventHooks();
-    }, 5000);
-  }
-
-  async function getSelfInfoFromStore(): Promise<{ id: string; number: string | null } | null> {
-    const page = (
-      client as unknown as {
-        pupPage?: {
-          evaluate: <T>(fn: () => T | Promise<T>) => Promise<T>;
-        };
-      }
-    ).pupPage;
-    if (!page?.evaluate) {
-      return null;
-    }
-    try {
-      return await page.evaluate(() => {
-        const store = (window as unknown as {
-          Store?: {
-            User?: {
-              getMaybeMePnUser?: () => { _serialized?: string; user?: string } | null;
-              getMaybeMeLidUser?: () => { _serialized?: string; user?: string } | null;
-            };
-          };
-        }).Store;
-        const wid =
-          store?.User?.getMaybeMePnUser?.() ||
-          store?.User?.getMaybeMeLidUser?.() ||
-          null;
-        if (!wid) {
-          return null;
-        }
-        const id = wid._serialized || "";
-        const number = wid.user || null;
-        return id ? { id, number } : null;
-      });
-    } catch {
-      return null;
-    }
-  }
-
-  function startReadyWatchdog(): void {
-    stopReadyWatchdog();
-    readyStartedAt = Date.now();
-    lastKnownState = null;
-    readyWatchdog = setInterval(() => {
-      if (watchdogRunning) {
+    sock.ev.on("messages.update", async (updates) => {
+      if (!pollVoteHandler || !sock || !activeGroupId) {
         return;
       }
-      watchdogRunning = true;
-      void (async () => {
-        try {
-          if (readyHandled) {
-            stopReadyWatchdog();
-            return;
-          }
-          const state = await getStateSafe();
-          if (state && state !== lastKnownState) {
-            lastKnownState = state;
-            console.log(`Estado WA (esperando ready): ${state}`);
-          }
-          if (!readyHandled && await isStoreReady()) {
-            console.warn("Store detectado antes de 'ready'. Usando fallback.");
-            await handleReady("store");
-            return;
-          }
-          if (state === "CONFLICT" && !conflictTakeoverAttempted) {
-            conflictTakeoverAttempted = true;
-            console.warn("Conflicto detectado. Intentando tomar control...");
-            await forceTakeover();
-          }
-          if (Date.now() - readyStartedAt > 120_000) {
-            if (restartAttempts < 1) {
-              restartAttempts += 1;
-              console.error(
-                "Tiempo de espera agotado esperando 'ready'. Reiniciando cliente..."
-              );
-              try {
-                await client.destroy();
-              } catch {
-                // ignore destroy errors
-              }
-              await delay(2000);
-              client.initialize();
-              stopReadyWatchdog();
-            } else {
-              console.error(
-                "Tiempo de espera agotado esperando 'ready'. Reinicia el proceso o borra la sesion."
-              );
-              stopReadyWatchdog();
-            }
-          }
-        } finally {
-          watchdogRunning = false;
+      for (const update of updates) {
+        const msg = update.update?.message;
+        if (!msg) {
+          continue;
         }
-      })();
-    }, 5000);
+        const content = unwrapMessage(msg);
+        if (!content?.pollUpdateMessage) {
+          continue;
+        }
+        // Baileys necesita helpers de poll para decodificar votos; por ahora omitimos.
+      }
+    });
+
+    reconnecting = false;
+  }
+
+  await connect();
+}
+
+function normalizeGroupName(value: string): string {
+  return value.trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+async function listGroupsSafe(sock: WASocket | null): Promise<RawGroup[]> {
+  if (!sock) {
+    return [];
+  }
+  try {
+    const groups = await sock.groupFetchAllParticipating();
+    return Object.values(groups).map((group) => ({
+      id: group.id,
+      name: group.subject || group.id,
+    }));
+  } catch {
+    return [];
+  }
+}
+
+async function findGroupByNameWithRetry(
+  sock: WASocket | null,
+  name: string,
+  attempts = 10,
+  delayMs = 1500
+): Promise<string | null> {
+  if (!sock) {
+    return null;
+  }
+  const normalizedTarget = normalizeGroupName(name);
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      const groups = await listGroupsSafe(sock);
+      const exact = groups.find((group) => group.name === name);
+      if (exact) {
+        return exact.id;
+      }
+      const normalized = groups.filter(
+        (group) => normalizeGroupName(group.name) === normalizedTarget
+      );
+      if (normalized.length === 1) {
+        console.warn(
+          `Nombre de grupo coincide por normalizacion. Usando '${normalized[0].name}'.`
+        );
+        return normalized[0].id;
+      }
+    } catch {
+      // ignore
+    }
+    if (attempt < attempts) {
+      await delay(delayMs);
+    }
+  }
+  return null;
+}
+
+async function resolveGroupName(sock: WASocket | null, id: string): Promise<string> {
+  if (!sock) {
+    return id;
+  }
+  try {
+    const groups = await listGroupsSafe(sock);
+    const match = groups.find((group) => group.id === id);
+    return match?.name || id;
+  } catch {
+    return id;
+  }
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function getSenderId(msg: WAMessage, selfId: string | null): string | null {
+  if (msg.key.fromMe) {
+    return selfId;
+  }
+  const participant =
+    msg.key.participant || (msg as { participant?: string }).participant;
+  return participant || msg.key.remoteJid || null;
+}
+
+function extractNumber(jid: string): string {
+  const normalized = jidNormalizedUser(jid);
+  const atIndex = normalized.indexOf("@");
+  const userPart = atIndex > 0 ? normalized.slice(0, atIndex) : normalized;
+  const digits = userPart.replace(/\D+/g, "");
+  return digits || userPart;
+}
+
+function normalizePhone(value: string | null | undefined): string | null {
+  if (!value) {
+    return null;
+  }
+  const digits = value.replace(/\D+/g, "");
+  return digits || null;
+}
+
+function rememberOutgoingBody(outgoingBodies: Map<string, number>, body: string): void {
+  const trimmed = body.trim();
+  if (!trimmed) {
+    return;
+  }
+  outgoingBodies.set(trimmed, Date.now() + 30_000);
+}
+
+function isOutgoingBody(outgoingBodies: Map<string, number>, body: string): boolean {
+  const trimmed = body.trim();
+  if (!trimmed) {
+    return false;
+  }
+  const expiresAt = outgoingBodies.get(trimmed);
+  if (!expiresAt) {
+    return false;
+  }
+  if (expiresAt <= Date.now()) {
+    outgoingBodies.delete(trimmed);
+    return false;
+  }
+  return true;
+}
+
+function shouldProcessMessage(
+  msg: WAMessage,
+  ignoredMessageIds: Set<string>,
+  outgoingBodies: Map<string, number>,
+  seenMessageIds: Set<string>
+): boolean {
+  const id = msg.key.id || "";
+  if (id && ignoredMessageIds.has(id)) {
+    ignoredMessageIds.delete(id);
+    return false;
+  }
+  if (msg.key.fromMe && msg.message) {
+    const content = unwrapMessage(msg.message);
+    const text = content ? summarizeMessage(content).text : "";
+    if (text && isOutgoingBody(outgoingBodies, text)) {
+      return false;
+    }
+  }
+  const key = `${msg.key.remoteJid || ""}_${id}`;
+  if (seenMessageIds.has(key)) {
+    return false;
+  }
+  seenMessageIds.add(key);
+  return true;
+}
+
+function getTimestampSeconds(msg: WAMessage): number {
+  const ts = msg.messageTimestamp;
+  if (typeof ts === "number") {
+    return ts;
+  }
+  if (ts && typeof ts === "object" && "toNumber" in ts) {
+    return (ts as { toNumber: () => number }).toNumber();
+  }
+  return Math.floor(Date.now() / 1000);
+}
+
+function unwrapMessage(message: proto.IMessage | null | undefined): proto.IMessage | null {
+  if (!message) {
+    return null;
+  }
+  if (message.ephemeralMessage?.message) {
+    return unwrapMessage(message.ephemeralMessage.message);
+  }
+  if (message.viewOnceMessage?.message) {
+    return unwrapMessage(message.viewOnceMessage.message);
+  }
+  if (message.viewOnceMessageV2?.message) {
+    return unwrapMessage(message.viewOnceMessageV2.message);
+  }
+  if (message.documentWithCaptionMessage?.message) {
+    return unwrapMessage(message.documentWithCaptionMessage.message);
+  }
+  if (message.editedMessage?.message) {
+    return unwrapMessage(message.editedMessage.message);
+  }
+  return message;
+}
+
+function summarizeMessage(message: proto.IMessage): {
+  text: string;
+  hasMedia: boolean;
+  mediaType: string | null;
+  isSticker: boolean;
+} {
+  const type = getContentType(message);
+  if (!type) {
+    return { text: "", hasMedia: false, mediaType: null, isSticker: false };
+  }
+
+  switch (type) {
+    case "conversation":
+      return { text: message.conversation || "", hasMedia: false, mediaType: null, isSticker: false };
+    case "extendedTextMessage":
+      return { text: message.extendedTextMessage?.text || "", hasMedia: false, mediaType: null, isSticker: false };
+    case "imageMessage":
+      return { text: message.imageMessage?.caption || "", hasMedia: true, mediaType: "image", isSticker: false };
+    case "videoMessage":
+      return { text: message.videoMessage?.caption || "", hasMedia: true, mediaType: "video", isSticker: false };
+    case "audioMessage":
+      return {
+        text: "",
+        hasMedia: true,
+        mediaType: message.audioMessage?.ptt ? "ptt" : "audio",
+        isSticker: false,
+      };
+    case "documentMessage":
+      return { text: message.documentMessage?.caption || "", hasMedia: true, mediaType: "document", isSticker: false };
+    case "stickerMessage":
+      return { text: "", hasMedia: true, mediaType: "sticker", isSticker: true };
+    default:
+      return { text: "", hasMedia: false, mediaType: type, isSticker: false };
+  }
+}
+
+function buildFallbackBody(summary: {
+  hasMedia: boolean;
+  mediaType: string | null;
+}): string {
+  if (summary.hasMedia) {
+    return `[media:${summary.mediaType || "desconocido"}]`;
+  }
+  if (summary.mediaType) {
+    return `[${summary.mediaType}]`;
+  }
+  return "[mensaje sin texto]";
+}
+
+async function downloadMediaPayload(message: proto.IMessage): Promise<MediaPayload | null> {
+  if (message.imageMessage) {
+    return downloadFromMessage(message.imageMessage, "image");
+  }
+  if (message.videoMessage) {
+    return downloadFromMessage(message.videoMessage, "video");
+  }
+  if (message.audioMessage) {
+    return downloadFromMessage(message.audioMessage, "audio");
+  }
+  if (message.documentMessage) {
+    return downloadFromMessage(message.documentMessage, "document");
+  }
+  return null;
+}
+
+async function downloadFromMessage(
+  content: MediaContent,
+  type: "image" | "video" | "audio" | "document"
+): Promise<MediaPayload | null> {
+  try {
+    const stream = await downloadContentFromMessage(content, type);
+    const chunks: Buffer[] = [];
+    for await (const chunk of stream) {
+      chunks.push(Buffer.from(chunk));
+    }
+    const buffer = Buffer.concat(chunks);
+    const mimetype = (content as { mimetype?: string }).mimetype || "application/octet-stream";
+    const filename = (content as { fileName?: string }).fileName || null;
+    return {
+      data: buffer.toString("base64"),
+      mimetype,
+      filename,
+    };
+  } catch {
+    return null;
   }
 }
