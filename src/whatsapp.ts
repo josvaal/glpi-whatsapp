@@ -1,3 +1,6 @@
+import fs from "fs";
+import fs from "fs";
+import path from "path";
 import qrcode from "qrcode-terminal";
 import makeWASocket, {
   DisconnectReason,
@@ -47,9 +50,14 @@ async function start(
   const seenMessageIds = new Set<string>();
   const ignoredMessageIds = new Set<string>();
   const outgoingBodies = new Map<string, number>();
+  const lidToNumber = new Map<string, string>();
+  const lidMapPath = path.join(config.sessionDir, "lid-map.json");
+  let lidSaveTimer: NodeJS.Timeout | null = null;
 
   let sock: WASocket | null = null;
   let reconnecting = false;
+
+  loadLidMap();
 
   async function connect(): Promise<void> {
     if (reconnecting) {
@@ -88,7 +96,7 @@ async function start(
         console.log("Autenticado.");
         console.log("Sesion iniciada.");
         selfId = sock?.user?.id ?? null;
-        selfNumber = normalizePhone(selfId ? extractNumber(selfId) : null);
+        selfNumber = resolveSenderNumber(selfId);
         activeGroupId = await findGroupByNameWithRetry(sock, config.groupName);
         if (!activeGroupId) {
           console.error(`No se encontro el grupo '${config.groupName}'.`);
@@ -152,7 +160,7 @@ async function start(
         }
 
         const senderId = getSenderId(msg, selfId);
-        const senderNumber = normalizePhone(senderId ? extractNumber(senderId) : null);
+        const senderNumber = resolveSenderNumber(senderId);
         const senderLabel = msg.pushName || senderNumber || "Desconocido";
         const timestamp = new Date(getTimestampSeconds(msg) * 1000);
         const body = summary.text || buildFallbackBody(summary);
@@ -240,10 +248,108 @@ async function start(
       }
     });
 
+    sock.ev.on("contacts.upsert", (contacts) => {
+      for (const contact of contacts) {
+        const lid = normalizeLid(contact.lid || contact.id || "");
+        const jid = contact.jid || (contact.id?.endsWith("@s.whatsapp.net") ? contact.id : null);
+        if (lid && jid) {
+          setLidMapping(lid, jid);
+        }
+      }
+    });
+
+    sock.ev.on("chats.phoneNumberShare", (share) => {
+      const lid = normalizeLid((share as { lid?: string } | null)?.lid || "");
+      const jid = (share as { jid?: string } | null)?.jid || null;
+      if (lid && jid) {
+        setLidMapping(lid, jid);
+      }
+    });
+
     reconnecting = false;
   }
 
   await connect();
+
+  function normalizeLid(value: string): string | null {
+    if (!value) {
+      return null;
+    }
+    const normalized = jidNormalizedUser(value);
+    return isLidUser(normalized) ? normalized : null;
+  }
+
+  function resolveSenderNumber(senderId: string | null): string | null {
+    if (!senderId) {
+      return null;
+    }
+    const normalized = jidNormalizedUser(senderId);
+    const direct = extractNumber(normalized);
+    if (direct) {
+      return normalizePhone(direct);
+    }
+    if (isLidUser(normalized)) {
+      return lidToNumber.get(normalized) ?? null;
+    }
+    return null;
+  }
+
+  function setLidMapping(lid: string, jid: string): void {
+    const normalizedLid = normalizeLid(lid);
+    const number = normalizePhone(extractNumber(jid));
+    if (!normalizedLid || !number) {
+      return;
+    }
+    if (lidToNumber.get(normalizedLid) === number) {
+      return;
+    }
+    lidToNumber.set(normalizedLid, number);
+    scheduleLidSave();
+  }
+
+  function scheduleLidSave(): void {
+    if (lidSaveTimer) {
+      return;
+    }
+    lidSaveTimer = setTimeout(() => {
+      lidSaveTimer = null;
+      saveLidMap();
+    }, 1000);
+  }
+
+  function saveLidMap(): void {
+    try {
+      fs.mkdirSync(config.sessionDir, { recursive: true });
+      const payload: Record<string, string> = {};
+      for (const [lid, number] of lidToNumber.entries()) {
+        payload[lid] = number;
+      }
+      fs.writeFileSync(lidMapPath, JSON.stringify(payload, null, 2));
+    } catch (err) {
+      const messageText = err instanceof Error ? err.message : String(err);
+      console.warn(`No se pudo guardar lid-map.json: ${messageText}`);
+    }
+  }
+
+  function loadLidMap(): void {
+    try {
+      if (!fs.existsSync(lidMapPath)) {
+        return;
+      }
+      const raw = fs.readFileSync(lidMapPath, "utf-8");
+      const parsed = JSON.parse(raw) as Record<string, string>;
+      for (const [lid, number] of Object.entries(parsed || {})) {
+        const normalizedLid = normalizeLid(lid);
+        const normalizedNumber = normalizePhone(number);
+        if (normalizedLid && normalizedNumber) {
+          lidToNumber.set(normalizedLid, normalizedNumber);
+        }
+      }
+    } catch (err) {
+      const messageText = err instanceof Error ? err.message : String(err);
+      console.warn(`No se pudo leer lid-map.json: ${messageText}`);
+    }
+  }
 }
 
 function normalizeGroupName(value: string): string {

@@ -95,13 +95,6 @@ function normalizePhone(value: string | null | undefined): string | null {
   return digits || null;
 }
 
-function normalizeName(value: string): string {
-  return normalizeText(value)
-    .replace(/[^A-Z ]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
 function buildCommandRegex(command: string): RegExp {
   const tokens = command.trim().split(/\s+/).map(escapeRegExp);
   const pattern = tokens.join("\\s+");
@@ -288,14 +281,10 @@ export class TicketFlow {
   private sessions = new Map<string, TicketSession>();
   private glpi: GlpiClient;
   private options: TicketFlowOptions;
-  private technicianNameEntries: Array<{ name: string; phone: string }>;
 
   constructor(glpi: GlpiClient, options: TicketFlowOptions) {
     this.glpi = glpi;
     this.options = options;
-    this.technicianNameEntries = buildTechnicianNameEntries(
-      options.technicianByPhone
-    );
   }
 
   async handleMessage(message: IncomingMessage): Promise<void> {
@@ -692,25 +681,6 @@ export class TicketFlow {
     if (labelNumber && this.options.technicianByPhone[labelNumber]) {
       return labelNumber;
     }
-
-    const normalizedLabel = normalizeName(label);
-    if (!normalizedLabel) {
-      return null;
-    }
-
-    const exact = this.technicianNameEntries.find(
-      (entry) => entry.name === normalizedLabel
-    );
-    if (exact) {
-      return exact.phone;
-    }
-
-    for (const entry of this.technicianNameEntries) {
-      if (normalizedLabel.includes(entry.name) || entry.name.includes(normalizedLabel)) {
-        return entry.phone;
-      }
-    }
-
     return null;
   }
 
@@ -1010,17 +980,4 @@ export class TicketFlow {
   }
 }
 
-function buildTechnicianNameEntries(
-  map: Record<string, string>
-): Array<{ name: string; phone: string }> {
-  const entries: Array<{ name: string; phone: string }> = [];
-  for (const [phone, label] of Object.entries(map)) {
-    const normalizedName = normalizeName(label);
-    if (!normalizedName) {
-      continue;
-    }
-    entries.push({ name: normalizedName, phone });
-  }
-  return entries;
-}
 
