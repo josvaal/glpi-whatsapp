@@ -1,5 +1,4 @@
 import fs from "fs";
-import fs from "fs";
 import path from "path";
 import qrcode from "qrcode-terminal";
 import makeWASocket, {
@@ -118,6 +117,7 @@ async function start(
             activeGroupId
           )}`
         );
+        await logGroupMembers(sock, activeGroupId, setLidMapping);
       } else if (connection === "close") {
         const statusCode =
           (lastDisconnect?.error as { output?: { statusCode?: number } })
@@ -417,6 +417,44 @@ async function resolveGroupName(sock: WASocket | null, id: string): Promise<stri
     return match?.name || id;
   } catch {
     return id;
+  }
+}
+
+async function logGroupMembers(
+  sock: WASocket | null,
+  id: string,
+  onMapping?: (lid: string, jid: string) => void
+): Promise<void> {
+  if (!sock) {
+    return;
+  }
+  try {
+    const metadata = await sock.groupMetadata(id);
+    const participants = metadata.participants || [];
+    console.log(
+      `Miembros del grupo (${participants.length}) [modo: ${metadata.addressingMode}]:`
+    );
+    for (const participant of participants) {
+      const name =
+        participant.name ||
+        participant.notify ||
+        participant.verifiedName ||
+        "Desconocido";
+      const jid = participant.jid || "-";
+      const lid = participant.lid || "-";
+      const idValue = participant.id || jid || lid || "-";
+      const number =
+        jid !== "-" ? normalizePhone(extractNumber(jid)) || "-" : "-";
+      if (onMapping && lid !== "-" && jid !== "-") {
+        onMapping(lid, jid);
+      }
+      console.log(
+        `- ${name} | number: ${number} | id: ${idValue} | jid: ${jid} | lid: ${lid}`
+      );
+    }
+  } catch (err) {
+    const messageText = err instanceof Error ? err.message : String(err);
+    console.warn(`No se pudieron listar miembros del grupo: ${messageText}`);
   }
 }
 
