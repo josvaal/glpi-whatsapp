@@ -294,6 +294,7 @@ async function start(
     return null;
   }
 
+
   function setLidMapping(lid: string, jid: string): void {
     const normalizedLid = normalizeLid(lid);
     const number = normalizePhone(extractNumber(jid));
