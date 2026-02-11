@@ -5,6 +5,7 @@ import makeWASocket, {
   fetchLatestBaileysVersion,
   getContentType,
   jidNormalizedUser,
+  isLidUser,
   proto,
   useMultiFileAuthState,
   type WAMessage,
@@ -326,12 +327,15 @@ function getSenderId(msg: WAMessage, selfId: string | null): string | null {
   return participant || msg.key.remoteJid || null;
 }
 
-function extractNumber(jid: string): string {
+function extractNumber(jid: string): string | null {
   const normalized = jidNormalizedUser(jid);
+  if (isLidUser(normalized)) {
+    return null;
+  }
   const atIndex = normalized.indexOf("@");
   const userPart = atIndex > 0 ? normalized.slice(0, atIndex) : normalized;
   const digits = userPart.replace(/\D+/g, "");
-  return digits || userPart;
+  return digits || null;
 }
 
 function normalizePhone(value: string | null | undefined): string | null {
