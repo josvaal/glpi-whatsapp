@@ -722,10 +722,18 @@ export class GlpiClient {
     });
     params.push(["range", range]);
     const searchQuery = this.buildQueryString(params);
-    const response = await this.requestForSearch(`search/User?${searchQuery}`, {
-      method: "GET",
-    });
-    return this.parseUserCandidates(response);
+    try {
+      const response = await this.requestForSearch(`search/User?${searchQuery}`, {
+        method: "GET",
+      });
+      return this.parseUserCandidates(response);
+    } catch (err) {
+      const messageText = err instanceof Error ? err.message : String(err);
+      if (this.isRangeExceededError(messageText)) {
+        return [];
+      }
+      throw err;
+    }
   }
 
   private parseUserCandidates(response: unknown): GlpiUserCandidate[] {
@@ -885,22 +893,39 @@ export class GlpiClient {
     };
 
     const query = this.buildQueryString(buildParams(criteriaWithEntity));
-    const response = await this.requestForSearch(`search/User?${query}`, {
-      method: "GET",
-    });
-    const parsed = this.parseUserCandidates(response);
+    let parsed: GlpiUserCandidate[] = [];
+    try {
+      const response = await this.requestForSearch(`search/User?${query}`, {
+        method: "GET",
+      });
+      parsed = this.parseUserCandidates(response);
+    } catch (err) {
+      const messageText = err instanceof Error ? err.message : String(err);
+      if (!this.isRangeExceededError(messageText)) {
+        throw err;
+      }
+      parsed = [];
+    }
     if (parsed.length > 0 || !usedEntityFilter) {
       return parsed;
     }
 
     const fallbackQuery = this.buildQueryString(buildParams(criteria));
-    const fallbackResponse = await this.requestForSearch(
-      `search/User?${fallbackQuery}`,
-      {
-        method: "GET",
+    try {
+      const fallbackResponse = await this.requestForSearch(
+        `search/User?${fallbackQuery}`,
+        {
+          method: "GET",
+        }
+      );
+      return this.parseUserCandidates(fallbackResponse);
+    } catch (err) {
+      const messageText = err instanceof Error ? err.message : String(err);
+      if (this.isRangeExceededError(messageText)) {
+        return [];
       }
-    );
-    return this.parseUserCandidates(fallbackResponse);
+      throw err;
+    }
   }
 
   private splitFullName(fullName: string): NameSplit[] {
@@ -1223,6 +1248,10 @@ export class GlpiClient {
   private isInvalidFieldIdError(messageText: string): boolean {
     const normalized = normalizeText(messageText);
     return normalized.includes("ID ERRONEO");
+  }
+
+  private isRangeExceededError(messageText: string): boolean {
+    return messageText.includes("ERROR_RANGE_EXCEED_TOTAL");
   }
 
   async findUsersByDni(dni: string): Promise<GlpiUserCandidate[]> {

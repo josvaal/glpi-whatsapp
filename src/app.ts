@@ -28,7 +28,19 @@ export async function run(): Promise<void> {
       console.log(
         `[${message.timestamp.toISOString()}] ${message.senderLabel}: ${message.body}${mediaTag}`
       );
-      await flow.handleMessage(message);
+      try {
+        await flow.handleMessage(message);
+      } catch (err) {
+        const messageText = err instanceof Error ? err.message : String(err);
+        console.error(`Error al procesar mensaje: ${messageText}`);
+        try {
+          await message.reply(
+            "Ocurrio un error al procesar el ticket en GLPI. Intenta nuevamente o contacta al administrador."
+          );
+        } catch {
+          // ignore reply failures
+        }
+      }
     },
     async (vote) => {
       const selected = vote.selectedOptionNames.length > 0
@@ -37,7 +49,19 @@ export async function run(): Promise<void> {
       console.log(
         `[${vote.timestamp.toISOString()}] ${vote.senderLabel}: [encuesta] ${selected}`
       );
-      await flow.handlePollVote(vote);
+      try {
+        await flow.handlePollVote(vote);
+      } catch (err) {
+        const messageText = err instanceof Error ? err.message : String(err);
+        console.error(`Error al procesar encuesta: ${messageText}`);
+        try {
+          await vote.reply(
+            "Ocurrio un error al procesar la encuesta. Intenta nuevamente."
+          );
+        } catch {
+          // ignore reply failures
+        }
+      }
     }
   );
 }
