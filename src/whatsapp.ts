@@ -1,16 +1,20 @@
 import fs from "fs";
 import path from "path";
+import { createHash, randomBytes } from "crypto";
 import qrcode from "qrcode-terminal";
 import makeWASocket, {
   DisconnectReason,
+  decryptPollVote,
   downloadContentFromMessage,
   fetchLatestBaileysVersion,
+  getKeyAuthor,
   getContentType,
   jidNormalizedUser,
   isLidUser,
   proto,
   useMultiFileAuthState,
   type WAMessage,
+  type WAMessageUpdate,
   type WASocket,
 } from "@whiskeysockets/baileys";
 import pino from "pino";
@@ -27,6 +31,15 @@ type MediaContent =
   | proto.Message.IVideoMessage
   | proto.Message.IAudioMessage
   | proto.Message.IDocumentMessage;
+
+type PollContext = {
+  options: string[];
+  messageSecret: Uint8Array;
+  creatorJid: string;
+  expiresAt: number;
+};
+
+const POLL_CONTEXT_TTL_MS = 30 * 60 * 1000;
 
 export function startWhatsAppListener(
   config: WhatsappConfig,
@@ -49,6 +62,7 @@ async function start(
   const seenMessageIds = new Set<string>();
   const ignoredMessageIds = new Set<string>();
   const outgoingBodies = new Map<string, number>();
+  const pollContexts = new Map<string, PollContext>();
   const lidToNumber = new Map<string, string>();
   const lidMapPath = path.join(config.sessionDir, "lid-map.json");
   let lidSaveTimer: NodeJS.Timeout | null = null;
@@ -203,23 +217,13 @@ async function start(
             title: string,
             options: string[],
             allowMultiple = false
-          ) => {
-            if (!sock) {
-              return null;
-            }
-            const sent = await sock.sendMessage(chatId, {
-              poll: {
-                name: title,
-                values: options,
-                selectableCount: allowMultiple ? 0 : 1,
-              },
-            });
-            const sentId = sent?.key?.id;
-            if (sentId) {
-              ignoredMessageIds.add(sentId);
-            }
-            return sentId ?? null;
-          },
+          ) =>
+            sendPollToChat(
+              chatId,
+              title,
+              options,
+              allowMultiple
+            ),
         };
 
         try {
@@ -235,16 +239,97 @@ async function start(
       if (!pollVoteHandler || !sock || !activeGroupId) {
         return;
       }
+      prunePollContexts(pollContexts);
       for (const update of updates) {
+        const chatId = update.key?.remoteJid || "";
+        if (chatId !== activeGroupId) {
+          continue;
+        }
         const msg = update.update?.message;
         if (!msg) {
           continue;
         }
         const content = unwrapMessage(msg);
-        if (!content?.pollUpdateMessage) {
+        const pollUpdate = content?.pollUpdateMessage;
+        if (!pollUpdate?.vote) {
           continue;
         }
-        // Baileys necesita helpers de poll para decodificar votos; por ahora omitimos.
+        const pollMessageId = pollUpdate.pollCreationMessageKey?.id || null;
+        if (!pollMessageId) {
+          continue;
+        }
+        const pollContext = pollContexts.get(pollMessageId);
+        if (!pollContext) {
+          continue;
+        }
+        const pollCreatorJid = jidNormalizedUser(pollContext.creatorJid);
+        const voterJid = jidNormalizedUser(getKeyAuthor(update.key, pollCreatorJid));
+        let selectedOptionIds: number[] = [];
+        let selectedOptionNames: string[] = [];
+        try {
+          const vote = decryptPollVote(pollUpdate.vote, {
+            pollCreatorJid,
+            pollMsgId: pollMessageId,
+            pollEncKey: pollContext.messageSecret,
+            voterJid,
+          });
+          const selected = resolvePollVoteSelections(
+            vote.selectedOptions,
+            pollContext.options
+          );
+          selectedOptionIds = selected.selectedOptionIds;
+          selectedOptionNames = selected.selectedOptionNames;
+        } catch (err) {
+          const messageText = err instanceof Error ? err.message : String(err);
+          console.warn(
+            `No se pudo decodificar voto de encuesta ${pollMessageId}: ${messageText}`
+          );
+          continue;
+        }
+        const senderId = getSenderIdFromKey(update.key, selfId);
+        const senderNumber = resolveSenderNumber(senderId);
+        const senderLabel = senderNumber || senderId || "Desconocido";
+        const timestamp = resolvePollTimestamp(update, pollUpdate);
+
+        const vote: IncomingPollVote = {
+          chatId,
+          senderId,
+          senderNumber,
+          senderLabel,
+          pollMessageId,
+          selectedOptionIds,
+          selectedOptionNames,
+          timestamp,
+          reply: async (text: string) => {
+            if (!sock) {
+              return;
+            }
+            rememberOutgoingBody(outgoingBodies, text);
+            const sent = await sock.sendMessage(chatId, { text });
+            const sentId = sent?.key?.id;
+            if (sentId) {
+              ignoredMessageIds.add(sentId);
+            }
+          },
+          sendPoll: async (
+            title: string,
+            options: string[],
+            allowMultiple = false
+          ) =>
+            sendPollToChat(
+              chatId,
+              title,
+              options,
+              allowMultiple
+            ),
+        };
+
+        try {
+          await pollVoteHandler(vote);
+        } catch (err) {
+          const messageText = err instanceof Error ? err.message : String(err);
+          console.error(`Error al procesar voto de encuesta: ${messageText}`);
+        }
       }
     });
 
@@ -270,6 +355,43 @@ async function start(
   }
 
   await connect();
+
+  async function sendPollToChat(
+    chatId: string,
+    title: string,
+    options: string[],
+    allowMultiple = false
+  ): Promise<string | null> {
+    if (!sock) {
+      return null;
+    }
+    prunePollContexts(pollContexts);
+    const messageSecret = randomBytes(32);
+    const sent = await sock.sendMessage(chatId, {
+      poll: {
+        name: title,
+        values: options,
+        selectableCount: allowMultiple ? 0 : 1,
+        messageSecret,
+      },
+    });
+    const sentId = sent?.key?.id;
+    if (sentId) {
+      ignoredMessageIds.add(sentId);
+      const creatorJid = selfId
+        ? jidNormalizedUser(selfId)
+        : jidNormalizedUser(sock.user?.id || "");
+      if (creatorJid) {
+        pollContexts.set(sentId, {
+          options: [...options],
+          messageSecret: new Uint8Array(messageSecret),
+          creatorJid,
+          expiresAt: Date.now() + POLL_CONTEXT_TTL_MS,
+        });
+      }
+    }
+    return sentId ?? null;
+  }
 
   function normalizeLid(value: string): string | null {
     if (!value) {
@@ -472,6 +594,19 @@ function getSenderId(msg: WAMessage, selfId: string | null): string | null {
   return participant || msg.key.remoteJid || null;
 }
 
+function getSenderIdFromKey(
+  key: proto.IMessageKey | null | undefined,
+  selfId: string | null
+): string | null {
+  if (!key) {
+    return null;
+  }
+  if (key.fromMe) {
+    return selfId;
+  }
+  return key.participant || key.remoteJid || null;
+}
+
 function extractNumber(jid: string): string | null {
   const normalized = jidNormalizedUser(jid);
   if (isLidUser(normalized)) {
@@ -550,6 +685,99 @@ function getTimestampSeconds(msg: WAMessage): number {
     return (ts as { toNumber: () => number }).toNumber();
   }
   return Math.floor(Date.now() / 1000);
+}
+
+function toNumericValue(value: unknown): number | null {
+  if (typeof value === "number") {
+    return value;
+  }
+  if (
+    value &&
+    typeof value === "object" &&
+    "toNumber" in value &&
+    typeof (value as { toNumber?: unknown }).toNumber === "function"
+  ) {
+    try {
+      return (value as { toNumber: () => number }).toNumber();
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+function resolvePollTimestamp(
+  update: WAMessageUpdate,
+  pollUpdate: proto.Message.IPollUpdateMessage
+): Date {
+  const senderTimestampMs = toNumericValue(pollUpdate.senderTimestampMs);
+  if (senderTimestampMs && senderTimestampMs > 0) {
+    return new Date(senderTimestampMs);
+  }
+  const messageTimestamp = toNumericValue(
+    (update.update as { messageTimestamp?: unknown }).messageTimestamp
+  );
+  if (messageTimestamp && messageTimestamp > 0) {
+    return new Date(messageTimestamp * 1000);
+  }
+  return new Date();
+}
+
+function hashPollOption(option: string): string {
+  return createHash("sha256").update(option, "utf8").digest("base64");
+}
+
+function resolvePollVoteSelections(
+  selectedOptions: (Uint8Array | null | undefined)[] | null | undefined,
+  pollOptions: string[]
+): {
+  selectedOptionIds: number[];
+  selectedOptionNames: string[];
+} {
+  if (!selectedOptions || selectedOptions.length === 0 || pollOptions.length === 0) {
+    return { selectedOptionIds: [], selectedOptionNames: [] };
+  }
+
+  const hashToIndexes = new Map<string, number[]>();
+  for (let index = 0; index < pollOptions.length; index += 1) {
+    const hash = hashPollOption(pollOptions[index]);
+    const indexes = hashToIndexes.get(hash);
+    if (indexes) {
+      indexes.push(index);
+    } else {
+      hashToIndexes.set(hash, [index]);
+    }
+  }
+
+  const selectedOptionIds: number[] = [];
+  for (const selectedOption of selectedOptions) {
+    if (!selectedOption) {
+      continue;
+    }
+    const hash = Buffer.from(selectedOption).toString("base64");
+    const indexes = hashToIndexes.get(hash);
+    if (!indexes || indexes.length === 0) {
+      continue;
+    }
+    selectedOptionIds.push(indexes.shift() as number);
+  }
+  const uniqueOptionIds = Array.from(new Set(selectedOptionIds));
+  const selectedOptionNames = uniqueOptionIds
+    .map((index) => pollOptions[index])
+    .filter((value): value is string => Boolean(value));
+  return {
+    selectedOptionIds: uniqueOptionIds,
+    selectedOptionNames,
+  };
+}
+
+function prunePollContexts(pollContexts: Map<string, PollContext>): void {
+  const now = Date.now();
+  for (const [messageId, context] of pollContexts.entries()) {
+    if (context.expiresAt <= now) {
+      pollContexts.delete(messageId);
+    }
+  }
 }
 
 function unwrapMessage(message: proto.IMessage | null | undefined): proto.IMessage | null {
