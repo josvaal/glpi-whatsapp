@@ -52,6 +52,8 @@ async function start(
   const lidToNumber = new Map<string, string>();
   const lidMapPath = path.join(config.sessionDir, "lid-map.json");
   let lidSaveTimer: NodeJS.Timeout | null = null;
+  // Almacenar mensajes de poll creados para procesar votos posteriormente
+  const pollMessages = new Map<string, proto.IMessage>();
 
   let sock: WASocket | null = null;
   let reconnecting = false;
@@ -217,6 +219,10 @@ async function start(
             const sentId = sent?.key?.id;
             if (sentId) {
               ignoredMessageIds.add(sentId);
+              // Guardar el mensaje de poll para procesar votos posteriormente
+              if (sent?.message) {
+                pollMessages.set(sentId, sent.message);
+              }
             }
             return sentId ?? null;
           },
@@ -236,15 +242,114 @@ async function start(
         return;
       }
       for (const update of updates) {
-        const msg = update.update?.message;
-        if (!msg) {
+        const updateContent = update.update;
+        if (!updateContent) {
           continue;
         }
-        const content = unwrapMessage(msg);
-        if (!content?.pollUpdateMessage) {
+
+        // Verificar si hay actualizaciones de poll
+        const pollUpdates = updateContent.pollUpdates;
+        if (!pollUpdates || pollUpdates.length === 0) {
           continue;
         }
-        // Baileys necesita helpers de poll para decodificar votos; por ahora omitimos.
+
+        for (const pollUpdate of pollUpdates) {
+          const vote = pollUpdate.vote;
+          if (!vote) {
+            continue;
+          }
+
+          const pollCreationMessageKey = pollUpdate.pollUpdateMessageKey;
+          if (!pollCreationMessageKey) {
+            continue;
+          }
+
+          const pollMessageId = pollCreationMessageKey.id || "";
+          const chatId = update.key.remoteJid || "";
+
+          // Solo procesar mensajes del grupo activo
+          if (chatId !== activeGroupId) {
+            continue;
+          }
+
+          // Buscar el mensaje de creación de la poll en el mapa
+          const pollCreationMsg = pollMessages.get(pollMessageId);
+          if (!pollCreationMsg) {
+            continue;
+          }
+
+          const pollCreationContent = unwrapMessage(pollCreationMsg);
+          if (!pollCreationContent?.pollCreationMessage) {
+            continue;
+          }
+
+          const pollMsg = pollCreationContent.pollCreationMessage;
+          const pollOptions = pollMsg.options || [];
+
+          // Obtener las opciones seleccionadas
+          const selectedOptionIndices: number[] = [];
+          const selectedOptionNames: string[] = [];
+
+          // vote es un PollVoteMessage que contiene selectedOptions con los hashes
+          const selectedOptions = vote.selectedOptions || [];
+
+          for (const voteHash of selectedOptions) {
+            // Convertir Uint8Array a string hexadecimal
+            const hashHex = Buffer.from(voteHash).toString("hex").toUpperCase();
+            for (let i = 0; i < pollOptions.length; i++) {
+              const option = pollOptions[i];
+              if (option.optionHash === hashHex) {
+                selectedOptionIndices.push(i);
+                selectedOptionNames.push(option.optionName || "");
+              }
+            }
+          }
+
+          // Crear el objeto de voto para el handler
+          const voteObj = {
+            chatId,
+            senderId: update.key.participant || update.key.remoteJid || null,
+            senderNumber: resolveSenderNumber(update.key.participant || update.key.remoteJid || null),
+            senderLabel: "Desconocido",
+            pollMessageId,
+            selectedOptionIds: selectedOptionIndices,
+            selectedOptionNames,
+            timestamp: new Date(
+              typeof pollUpdate.senderTimestampMs === "number"
+                ? pollUpdate.senderTimestampMs
+                : pollUpdate.senderTimestampMs?.toNumber() || Date.now()
+            ),
+            reply: async (text: string) => {
+              if (!sock) {
+                return;
+              }
+              const sent = await sock.sendMessage(chatId, { text });
+              const sentId = sent?.key?.id;
+              if (sentId) {
+                ignoredMessageIds.add(sentId);
+              }
+            },
+            sendPoll: async (title: string, options: string[], allowMultiple = false) => {
+              if (!sock) {
+                return null;
+              }
+              const sent = await sock.sendMessage(chatId, {
+                poll: {
+                  name: title,
+                  values: options,
+                  selectableCount: allowMultiple ? 0 : 1,
+                },
+              });
+              const sentId = sent?.key?.id;
+              if (sentId) {
+                ignoredMessageIds.add(sentId);
+              }
+              return sentId ?? null;
+            },
+          };
+
+          await pollVoteHandler(voteObj);
+        }
       }
     });
 
