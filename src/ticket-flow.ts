@@ -5,6 +5,7 @@ import type {
   MediaPayload,
   TicketDraft,
 } from "./types";
+import type { TechnicianInfo } from "./config";
 import { normalizeText } from "./text";
 import { parseTicketText } from "./ticket-parser";
 import { GlpiClient } from "./glpi";
@@ -30,7 +31,7 @@ type TicketSession = {
 type TicketFlowOptions = {
   defaultCategoryId: number;
   defaultCategoryName?: string;
-  technicianByPhone: Record<string, string>;
+  techniciansByPhone: Record<string, TechnicianInfo>;
 };
 
 type MessageContext = {
@@ -602,13 +603,28 @@ export class TicketFlow {
     }
 
     let assigneeId: string | undefined;
-    const assigneeValue =
-      session.draft.asignado || this.resolveTechnicianFromSender(message);
-    if (assigneeValue) {
+    let assigneeName: string | undefined;
+
+    // Primero verificar si hay asignado en el draft
+    if (session.draft.asignado) {
+      assigneeName = session.draft.asignado;
+    } else {
+      // Si no hay asignado en draft, usar el técnico del remitente
+      const senderTech = this.resolveTechnicianFromSender(message);
+      if (senderTech) {
+        assigneeId = senderTech.glpiId;
+        assigneeName = senderTech.name;
+        // Actualizar el draft con el nombre del técnico
+        session.draft.asignado = senderTech.name;
+      }
+    }
+
+    // Si solo tenemos el nombre (del draft), buscar por nombre/DNI
+    if (assigneeName && !assigneeId) {
       const resolvedAssignee = await this.resolveUserId(
         message,
         session,
-        assigneeValue,
+        assigneeName,
         "tecnico",
         true
       );
@@ -646,13 +662,13 @@ export class TicketFlow {
     }
   }
 
-  private resolveTechnicianFromSender(message: MessageContext): string | null {
+  private resolveTechnicianFromSender(message: MessageContext): TechnicianInfo | null {
     const senderNumber = this.resolveSenderNumber(message);
     if (!senderNumber) {
       return null;
     }
-    const value = this.options.technicianByPhone[senderNumber];
-    return value ? value.trim() : null;
+    const techInfo = this.options.techniciansByPhone[senderNumber];
+    return techInfo || null;
   }
 
   private isAuthorizedSender(message: MessageContext): boolean {
@@ -672,13 +688,13 @@ export class TicketFlow {
 
   private resolveSenderNumber(message: MessageContext): string | null {
     const directNumber = normalizePhone(message.senderNumber);
-    if (directNumber && this.options.technicianByPhone[directNumber]) {
+    if (directNumber && this.options.techniciansByPhone[directNumber]) {
       return directNumber;
     }
 
     const label = message.senderLabel || "";
     const labelNumber = normalizePhone(label);
-    if (labelNumber && this.options.technicianByPhone[labelNumber]) {
+    if (labelNumber && this.options.techniciansByPhone[labelNumber]) {
       return labelNumber;
     }
     return null;

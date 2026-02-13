@@ -26,12 +26,18 @@ export type GlpiConfig = {
   enabled: boolean;
 };
 
+export type TechnicianInfo = {
+  name: string;
+  phone: string;
+  glpiId: string;
+};
+
 export type AppConfig = {
   whatsapp: WhatsappConfig;
   glpi: GlpiConfig;
   categoriesPath: string;
   defaultCategoryId: number;
-  technicianByPhone: Record<string, string>;
+  techniciansByPhone: Record<string, TechnicianInfo>;
 };
 
 function envBool(value: string | undefined, defaultValue: boolean): boolean {
@@ -61,23 +67,57 @@ function normalizePhone(value: string): string {
 }
 
 function normalizeTechnicianMap(
-  map: Record<string, string>
-): Record<string, string> {
-  const normalized: Record<string, string> = {};
-  for (const [key, value] of Object.entries(map)) {
-    const keyText = String(key ?? "").trim();
-    const valueText = String(value ?? "").trim();
-    if (!keyText || !valueText) {
+  map: Record<string, unknown>
+): Record<string, TechnicianInfo> {
+  const normalized: Record<string, TechnicianInfo> = {};
+  for (const [name, value] of Object.entries(map)) {
+    const nameText = String(name ?? "").trim();
+    if (!nameText) {
       continue;
     }
-    const keyDigits = normalizePhone(keyText);
-    const valueDigits = normalizePhone(valueText);
-    if (keyDigits.length >= 8) {
-      normalized[keyDigits] = valueText;
-    } else if (valueDigits.length >= 8) {
-      normalized[valueDigits] = keyText;
-    } else {
-      normalized[keyText] = valueText;
+
+    // Nuevo formato: [celular, glpi_id]
+    if (Array.isArray(value) && value.length >= 2) {
+      const phone = String(value[0] ?? "").trim();
+      const glpiId = String(value[1] ?? "").trim();
+
+      if (!phone || !glpiId) {
+        continue;
+      }
+
+      const normalizedPhone = normalizePhone(phone);
+      if (!normalizedPhone) {
+        continue;
+      }
+
+      normalized[normalizedPhone] = {
+        name: nameText,
+        phone: normalizedPhone,
+        glpiId,
+      };
+    }
+    // Formato antiguo por compatibilidad (phone -> name/glpi_id)
+    else {
+      const valueText = String(value ?? "").trim();
+      if (!valueText) {
+        continue;
+      }
+      const phoneDigits = normalizePhone(nameText);
+      const valueDigits = normalizePhone(valueText);
+
+      if (phoneDigits.length >= 8) {
+        normalized[phoneDigits] = {
+          name: valueText,
+          phone: phoneDigits,
+          glpiId: valueText,
+        };
+      } else if (valueDigits.length >= 8) {
+        normalized[valueDigits] = {
+          name: nameText,
+          phone: valueDigits,
+          glpiId: nameText,
+        };
+      }
     }
   }
   return normalized;
@@ -127,7 +167,7 @@ export function loadConfig(): AppConfig {
     ? 1
     : defaultCategoryIdRaw;
 
-  let technicianByPhone: Record<string, string> = {};
+  let techniciansByPhone: Record<string, TechnicianInfo> = {};
   const techniciansRaw = (process.env.TECHNICIAN_BY_PHONE || "").trim();
   let techniciansPath = (process.env.TECHNICIAN_BY_PHONE_PATH || "").trim();
   const defaultNumbersMapPath = path.join(
@@ -139,16 +179,16 @@ export function loadConfig(): AppConfig {
   }
   if (techniciansRaw) {
     try {
-      const parsed = JSON.parse(techniciansRaw) as Record<string, string>;
-      technicianByPhone = normalizeTechnicianMap(parsed || {});
+      const parsed = JSON.parse(techniciansRaw) as Record<string, unknown>;
+      techniciansByPhone = normalizeTechnicianMap(parsed || {});
     } catch (err) {
       console.warn("TECHNICIAN_BY_PHONE no es un JSON valido.");
     }
   } else if (techniciansPath && fs.existsSync(techniciansPath)) {
     try {
       const raw = fs.readFileSync(techniciansPath, "utf-8");
-      const parsed = JSON.parse(raw) as Record<string, string>;
-      technicianByPhone = normalizeTechnicianMap(parsed || {});
+      const parsed = JSON.parse(raw) as Record<string, unknown>;
+      techniciansByPhone = normalizeTechnicianMap(parsed || {});
     } catch (err) {
       console.warn("No se pudo leer TECHNICIAN_BY_PHONE_PATH.");
     }
@@ -176,6 +216,6 @@ export function loadConfig(): AppConfig {
     },
     categoriesPath,
     defaultCategoryId,
-    technicianByPhone,
+    techniciansByPhone,
   };
 }

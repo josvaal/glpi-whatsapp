@@ -15,7 +15,7 @@ export async function run(): Promise<void> {
   const flow = new TicketFlow(glpi, {
     defaultCategoryId: config.defaultCategoryId,
     defaultCategoryName,
-    technicianByPhone: config.technicianByPhone,
+    techniciansByPhone: config.techniciansByPhone,
   });
 
   startWhatsAppListener(
