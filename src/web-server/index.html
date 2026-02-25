@@ -367,9 +367,9 @@
         
         <div id="glpi-mfa-container" class="input-group hidden">
           <label for="mfa-code">🔐 Código MFA (revisa tu correo)</label>
-          <input 
-            type="text" 
-            id="mfa-code" 
+          <input
+            type="text"
+            id="mfa-code"
             placeholder="Ingresa el código de 6 dígitos"
             maxlength="6"
             pattern="[0-9]*"
@@ -379,7 +379,11 @@
             <button id="btn-submit-mfa" class="btn btn-primary" onclick="submitMfa()">
               ✅ Enviar Código
             </button>
+            <button id="btn-resend-mfa" class="btn btn-secondary" onclick="resendMfa()">
+              📧 Reenviar Código
+            </button>
           </div>
+          <p class="expires-info">El código MFA se envía al correo registrado en GLPI</p>
         </div>
         
         <div id="glpi-expires-info" class="expires-info hidden">
@@ -648,7 +652,13 @@
         btn.textContent = '✅ Enviar Código';
       }
     }
-    
+
+    // Reenviar código MFA
+    async function resendMfa() {
+      addLog('📧 Para reenviar el código MFA, intenta iniciar sesión nuevamente', 'info');
+      showAlert('glpi-alert-container', 'info', 'GLPI no permite reenviar el código desde la API. Intenta iniciar sesión nuevamente o verifica tu correo spam.');
+    }
+
     // Logout GLPI
     async function glpiLogout() {
       if (!confirm('¿Cerrar sesión de GLPI?')) return;
