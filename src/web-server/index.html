@@ -1,0 +1,762 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>GLPI WhatsApp Bot - Dashboard</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+    
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+      background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+      min-height: 100vh;
+      color: #e4e4e4;
+      padding: 20px;
+    }
+    
+    .container {
+      max-width: 1200px;
+      margin: 0 auto;
+    }
+    
+    h1 {
+      text-align: center;
+      margin-bottom: 30px;
+      color: #00d9ff;
+      font-size: 2.5rem;
+      text-shadow: 0 0 20px rgba(0, 217, 255, 0.3);
+    }
+    
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+      gap: 20px;
+      margin-bottom: 30px;
+    }
+    
+    .card {
+      background: rgba(255, 255, 255, 0.05);
+      border-radius: 15px;
+      padding: 25px;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      backdrop-filter: blur(10px);
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+    }
+    
+    .card h2 {
+      color: #00d9ff;
+      margin-bottom: 20px;
+      font-size: 1.5rem;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    
+    .card h2 .icon {
+      font-size: 1.8rem;
+    }
+    
+    .status {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 16px;
+      border-radius: 20px;
+      font-weight: 600;
+      font-size: 0.9rem;
+      margin-bottom: 20px;
+    }
+    
+    .status.connected {
+      background: rgba(0, 255, 136, 0.2);
+      color: #00ff88;
+      border: 1px solid rgba(0, 255, 136, 0.3);
+    }
+    
+    .status.disconnected {
+      background: rgba(255, 71, 87, 0.2);
+      color: #ff4757;
+      border: 1px solid rgba(255, 71, 87, 0.3);
+    }
+    
+    .status.pending {
+      background: rgba(255, 193, 7, 0.2);
+      color: #ffc107;
+      border: 1px solid rgba(255, 193, 7, 0.3);
+    }
+    
+    .status-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      animation: pulse 2s infinite;
+    }
+    
+    .status.connected .status-dot {
+      background: #00ff88;
+    }
+    
+    .status.disconnected .status-dot {
+      background: #ff4757;
+    }
+    
+    .status.pending .status-dot {
+      background: #ffc107;
+    }
+    
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
+    }
+    
+    .qr-container {
+      text-align: center;
+      padding: 20px;
+      background: rgba(255, 255, 255, 0.95);
+      border-radius: 10px;
+      margin: 15px 0;
+    }
+    
+    .qr-container img {
+      max-width: 200px;
+      height: auto;
+    }
+    
+    .qr-container p {
+      color: #333;
+      margin-top: 15px;
+      font-weight: 500;
+    }
+    
+    .input-group {
+      margin: 15px 0;
+    }
+    
+    .input-group label {
+      display: block;
+      margin-bottom: 8px;
+      color: #aaa;
+      font-size: 0.9rem;
+    }
+    
+    .input-group input {
+      width: 100%;
+      padding: 12px 15px;
+      border: 1px solid rgba(255, 255, 255, 0.2);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.1);
+      color: #fff;
+      font-size: 1rem;
+      transition: all 0.3s;
+    }
+    
+    .input-group input:focus {
+      outline: none;
+      border-color: #00d9ff;
+      background: rgba(255, 255, 255, 0.15);
+    }
+    
+    .input-group input::placeholder {
+      color: #666;
+    }
+    
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      padding: 12px 24px;
+      border: none;
+      border-radius: 8px;
+      font-size: 1rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.3s;
+      text-decoration: none;
+    }
+    
+    .btn-primary {
+      background: linear-gradient(135deg, #00d9ff 0%, #0099cc 100%);
+      color: #fff;
+    }
+    
+    .btn-primary:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 5px 20px rgba(0, 217, 255, 0.4);
+    }
+    
+    .btn-secondary {
+      background: rgba(255, 255, 255, 0.1);
+      color: #fff;
+      border: 1px solid rgba(255, 255, 255, 0.2);
+    }
+    
+    .btn-secondary:hover {
+      background: rgba(255, 255, 255, 0.2);
+    }
+    
+    .btn-danger {
+      background: linear-gradient(135deg, #ff4757 0%, #cc3344 100%);
+      color: #fff;
+    }
+    
+    .btn-danger:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 5px 20px rgba(255, 71, 87, 0.4);
+    }
+    
+    .btn:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+      transform: none !important;
+    }
+    
+    .btn-group {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-top: 15px;
+    }
+    
+    .logs-container {
+      background: rgba(0, 0, 0, 0.3);
+      border-radius: 10px;
+      padding: 15px;
+      max-height: 300px;
+      overflow-y: auto;
+      font-family: 'Courier New', monospace;
+      font-size: 0.85rem;
+    }
+    
+    .log-entry {
+      padding: 5px 0;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+      color: #aaa;
+    }
+    
+    .log-entry:last-child {
+      border-bottom: none;
+    }
+    
+    .log-entry.error {
+      color: #ff4757;
+    }
+    
+    .log-entry.success {
+      color: #00ff88;
+    }
+    
+    .log-entry.info {
+      color: #00d9ff;
+    }
+    
+    .user-info {
+      background: rgba(255, 255, 255, 0.05);
+      padding: 15px;
+      border-radius: 8px;
+      margin: 15px 0;
+    }
+    
+    .user-info p {
+      margin: 5px 0;
+      color: #aaa;
+    }
+    
+    .user-info strong {
+      color: #fff;
+    }
+    
+    .alert {
+      padding: 15px;
+      border-radius: 8px;
+      margin: 15px 0;
+      border-left: 4px solid;
+    }
+    
+    .alert-warning {
+      background: rgba(255, 193, 7, 0.1);
+      border-color: #ffc107;
+      color: #ffc107;
+    }
+    
+    .alert-error {
+      background: rgba(255, 71, 87, 0.1);
+      border-color: #ff4757;
+      color: #ff4757;
+    }
+    
+    .alert-success {
+      background: rgba(0, 255, 136, 0.1);
+      border-color: #00ff88;
+      color: #00ff88;
+    }
+    
+    .hidden {
+      display: none !important;
+    }
+    
+    .loading {
+      display: inline-block;
+      width: 20px;
+      height: 20px;
+      border: 3px solid rgba(255, 255, 255, 0.3);
+      border-radius: 50%;
+      border-top-color: #fff;
+      animation: spin 1s linear infinite;
+    }
+    
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+    
+    .expires-info {
+      font-size: 0.85rem;
+      color: #888;
+      margin-top: 10px;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>🤖 GLPI WhatsApp Bot Dashboard</h1>
+    
+    <div class="grid">
+      <!-- WhatsApp Card -->
+      <div class="card">
+        <h2><span class="icon">📱</span> WhatsApp</h2>
+        
+        <div id="whatsapp-status" class="status disconnected">
+          <span class="status-dot"></span>
+          <span id="whatsapp-status-text">Desconectado</span>
+        </div>
+        
+        <div id="whatsapp-qr-container" class="qr-container hidden">
+          <div id="whatsapp-qr"></div>
+          <p>Escanea este QR con WhatsApp</p>
+        </div>
+        
+        <div id="whatsapp-user-info" class="user-info hidden">
+          <p><strong>ID:</strong> <span id="whatsapp-user-id">-</span></p>
+          <p><strong>Nombre:</strong> <span id="whatsapp-user-name">-</span></p>
+        </div>
+        
+        <div id="whatsapp-error" class="alert alert-error hidden">
+          <span id="whatsapp-error-text"></span>
+        </div>
+        
+        <div class="btn-group">
+          <button id="btn-whatsapp-logout" class="btn btn-danger" onclick="whatsappLogout()">
+            🚪 Cerrar Sesión
+          </button>
+        </div>
+      </div>
+      
+      <!-- GLPI Card -->
+      <div class="card">
+        <h2><span class="icon">🎫</span> GLPI Session</h2>
+        
+        <div id="glpi-status" class="status disconnected">
+          <span class="status-dot"></span>
+          <span id="glpi-status-text">Sin sesión</span>
+        </div>
+        
+        <div id="glpi-mfa-container" class="input-group hidden">
+          <label for="mfa-code">🔐 Código MFA (revisa tu correo)</label>
+          <input 
+            type="text" 
+            id="mfa-code" 
+            placeholder="Ingresa el código de 6 dígitos"
+            maxlength="6"
+            pattern="[0-9]*"
+            inputmode="numeric"
+          >
+          <div class="btn-group">
+            <button id="btn-submit-mfa" class="btn btn-primary" onclick="submitMfa()">
+              ✅ Enviar Código
+            </button>
+          </div>
+        </div>
+        
+        <div id="glpi-expires-info" class="expires-info hidden">
+          <p>📅 Sesión válida hasta: <strong id="glpi-expires-at">-</strong></p>
+        </div>
+        
+        <div id="glpi-alert-container"></div>
+        
+        <div class="btn-group">
+          <button id="btn-glpi-login" class="btn btn-primary" onclick="startGlpiLogin()">
+            🔑 Iniciar Login GLPI
+          </button>
+          <button id="btn-glpi-logout" class="btn btn-danger" onclick="glpiLogout()">
+            🚪 Cerrar Sesión GLPI
+          </button>
+          <button id="btn-glpi-verify" class="btn btn-secondary" onclick="verifyGlpiSession()">
+            🔄 Verificar Sesión
+          </button>
+        </div>
+      </div>
+    </div>
+    
+    <!-- Logs Card -->
+    <div class="card">
+      <h2><span class="icon">📋</span> Logs en Tiempo Real</h2>
+      <div id="logs-container" class="logs-container">
+        <div class="log-entry">Esperando eventos...</div>
+      </div>
+    </div>
+  </div>
+  
+  <script>
+    let ws = null;
+    let reconnectTimeout = null;
+    let heartbeatInterval = null;
+
+    // Conectar WebSocket
+    function connectWebSocket() {
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const wsUrl = `${protocol}//${window.location.host}/ws`;
+
+      ws = new WebSocket(wsUrl);
+
+      ws.onopen = () => {
+        addLog('✅ Conectado al dashboard', 'success');
+        // Enviar heartbeat cada 10 segundos para mantener conexión
+        heartbeatInterval = setInterval(() => {
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'ping' }));
+          }
+        }, 10000);
+      };
+
+      ws.onclose = () => {
+        if (heartbeatInterval) {
+          clearInterval(heartbeatInterval);
+          heartbeatInterval = null;
+        }
+        addLog('🔌 Desconectado del dashboard', 'error');
+        reconnectTimeout = setTimeout(connectWebSocket, 3000);
+      };
+
+      ws.onerror = (error) => {
+        console.error('WebSocket error:', error);
+      };
+
+      ws.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          handleWebSocketMessage(data);
+        } catch (err) {
+          console.error('Error parsing WebSocket message:', err);
+        }
+      };
+    }
+    
+    function handleWebSocketMessage(data) {
+      switch (data.type) {
+        case 'initial-state':
+          updateWhatsAppState(data.whatsapp);
+          updateGlpiState(data.glpi);
+          data.logs.forEach(log => addLog(log, null, false));
+          break;
+
+        case 'whatsapp-state':
+          updateWhatsAppState(data.state);
+          break;
+
+        case 'whatsapp-qr':
+          // Actualizar QR recibido
+          updateWhatsAppState({ qrCode: data.qrCode, isConnected: false, isConnecting: true, user: null, error: null });
+          addLog('📱 Nuevo QR de WhatsApp recibido', 'info');
+          break;
+
+        case 'whatsapp-logout':
+          updateWhatsAppState(data.state);
+          addLog('WhatsApp: Sesión cerrada', 'info');
+          break;
+
+        case 'glpi-login-success':
+          updateGlpiState(data.status);
+          addLog('GLPI: Login completado exitosamente', 'success');
+          hideElement('glpi-mfa-container');
+          break;
+
+        case 'glpi-mfa-success':
+          updateGlpiState(data.status);
+          addLog('GLPI: Código MFA aceptado', 'success');
+          hideElement('glpi-mfa-container');
+          break;
+
+        case 'glpi-logout':
+          updateGlpiState(data.status);
+          addLog('GLPI: Sesión cerrada', 'info');
+          break;
+
+        case 'log':
+          addLog(data.message, null, false);
+          break;
+      }
+    }
+    
+    // Actualizar estado de WhatsApp
+    function updateWhatsAppState(state) {
+      const statusEl = document.getElementById('whatsapp-status');
+      const statusText = document.getElementById('whatsapp-status-text');
+      const qrContainer = document.getElementById('whatsapp-qr-container');
+      const qrDiv = document.getElementById('whatsapp-qr');
+      const userInfo = document.getElementById('whatsapp-user-info');
+      const errorDiv = document.getElementById('whatsapp-error');
+      const errorText = document.getElementById('whatsapp-error-text');
+      
+      if (state.isConnected) {
+        statusEl.className = 'status connected';
+        statusText.textContent = 'Conectado';
+        hideElement('whatsapp-qr-container');
+        showElement(userInfo);
+        hideElement('whatsapp-error');
+        
+        document.getElementById('whatsapp-user-id').textContent = state.user?.id || '-';
+        document.getElementById('whatsapp-user-name').textContent = state.user?.name || '-';
+      } else if (state.qrCode) {
+        statusEl.className = 'status pending';
+        statusText.textContent = 'Escanea QR';
+        showElement('whatsapp-qr-container');
+        
+        // Generar QR
+        const qrApiUrl = `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(state.qrCode)}`;
+        qrDiv.innerHTML = `<img src="${qrApiUrl}" alt="QR Code">`;
+        
+        hideElement('whatsapp-user-info');
+        hideElement('whatsapp-error');
+      } else {
+        statusEl.className = 'status disconnected';
+        statusText.textContent = 'Desconectado';
+        hideElement('whatsapp-qr-container');
+        hideElement('whatsapp-user-info');
+        
+        if (state.error) {
+          showElement('whatsapp-error');
+          errorText.textContent = state.error;
+        } else {
+          hideElement('whatsapp-error');
+        }
+      }
+    }
+    
+    // Actualizar estado de GLPI
+    function updateGlpiState(status) {
+      const statusEl = document.getElementById('glpi-status');
+      const statusText = document.getElementById('glpi-status-text');
+      const expiresInfo = document.getElementById('glpi-expires-info');
+      const alertContainer = document.getElementById('glpi-alert-container');
+
+      if (!statusEl || !statusText) {
+        return;
+      }
+
+      if (status.isValid) {
+        statusEl.className = 'status connected';
+        statusText.textContent = 'Sesión activa';
+        if (expiresInfo) showElement('expires-info');
+
+        if (status.expiresAt) {
+          const expiresAtEl = document.getElementById('glpi-expires-at');
+          if (expiresAtEl) {
+            expiresAtEl.textContent = new Date(status.expiresAt).toLocaleString();
+          }
+        }
+
+        if (alertContainer) alertContainer.innerHTML = '';
+      } else {
+        statusEl.className = 'status disconnected';
+        statusText.textContent = 'Sin sesión';
+        if (expiresInfo) hideElement('expires-info');
+        if (alertContainer) alertContainer.innerHTML = '';
+      }
+    }
+    
+    // Iniciar login GLPI (flujo automatico con HTTP)
+    async function startGlpiLogin() {
+      const btn = document.getElementById('btn-glpi-login');
+      btn.disabled = true;
+      btn.innerHTML = '<span class="loading"></span> Iniciando...';
+
+      try {
+        const response = await fetch('/api/glpi/login-start', { method: 'POST' });
+        const result = await response.json();
+
+        if (result.success && result.step === 'awaiting-mfa') {
+          addLog('✅ Login inicial exitoso. Ingresa el código MFA de tu correo.', 'success');
+          showAlert('glpi-alert-container', 'success', 'Revisa tu correo e ingresa el código MFA de 6 dígitos.');
+          showElement('glpi-mfa-container');
+        } else if (result.success) {
+          addLog('✅ Login GLPI completado', 'success');
+          showAlert('glpi-alert-container', 'success', 'Sesión iniciada exitosamente.');
+        } else {
+          addLog(`❌ Error en login GLPI: ${result.error}`, 'error');
+          showAlert('glpi-alert-container', 'error', result.error || 'Error en login');
+        }
+      } catch (err) {
+        addLog(`❌ Error: ${err.message}`, 'error');
+        showAlert('glpi-alert-container', 'error', 'Error de conexión');
+      } finally {
+        btn.disabled = false;
+        btn.textContent = '🔑 Iniciar Login GLPI';
+      }
+    }
+
+    // Enviar código MFA (flujo automatico con HTTP)
+    async function submitMfa() {
+      const input = document.getElementById('mfa-code');
+      const btn = document.getElementById('btn-submit-mfa');
+      const code = input.value.trim();
+
+      if (!code) {
+        showAlert('glpi-alert-container', 'warning', 'Ingresa el código MFA');
+        return;
+      }
+
+      btn.disabled = true;
+      btn.innerHTML = '<span class="loading"></span> Enviando...';
+
+      try {
+        const response = await fetch('/api/glpi/mfa-submit', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ code }),
+        });
+        const result = await response.json();
+
+        if (result.success) {
+          addLog('✅ Código MFA aceptado', 'success');
+          showAlert('glpi-alert-container', 'success', '¡Sesión iniciada exitosamente!');
+          input.value = '';
+          hideElement('glpi-mfa-container');
+        } else {
+          addLog(`❌ Error MFA: ${result.error}`, 'error');
+          showAlert('glpi-alert-container', 'error', result.error || 'Código inválido');
+        }
+      } catch (err) {
+        addLog(`❌ Error: ${err.message}`, 'error');
+        showAlert('glpi-alert-container', 'error', 'Error de conexión');
+      } finally {
+        btn.disabled = false;
+        btn.textContent = '✅ Enviar Código';
+      }
+    }
+    
+    // Logout GLPI
+    async function glpiLogout() {
+      if (!confirm('¿Cerrar sesión de GLPI?')) return;
+      
+      try {
+        await fetch('/api/glpi/logout', { method: 'POST' });
+        addLog('🚪 Sesión de GLPI cerrada', 'info');
+      } catch (err) {
+        addLog(`❌ Error: ${err.message}`, 'error');
+      }
+    }
+    
+    // Logout WhatsApp
+    async function whatsappLogout() {
+      if (!confirm('¿Cerrar sesión de WhatsApp? Deberás escanear el QR nuevamente.')) return;
+      
+      try {
+        await fetch('/api/whatsapp/logout', { method: 'POST' });
+        addLog('🚪 Sesión de WhatsApp cerrada', 'info');
+      } catch (err) {
+        addLog(`❌ Error: ${err.message}`, 'error');
+      }
+    }
+    
+    // Verificar sesión GLPI
+    async function verifyGlpiSession() {
+      const btn = document.getElementById('btn-glpi-verify');
+      btn.disabled = true;
+      btn.textContent = '🔄 Verificando...';
+      
+      try {
+        const response = await fetch('/api/glpi/verify', { method: 'POST' });
+        const result = await response.json();
+        
+        if (result.isValid) {
+          addLog('✅ Sesión de GLPI válida', 'success');
+          showAlert('glpi-alert-container', 'success', 'Sesión activa y válida');
+        } else {
+          addLog('⚠️ Sesión de GLPI expirada o inválida', 'warning');
+          showAlert('glpi-alert-container', 'warning', 'Sesión expirada. Inicia login nuevamente.');
+        }
+        
+        updateGlpiState(result);
+      } catch (err) {
+        addLog(`❌ Error: ${err.message}`, 'error');
+        showAlert('glpi-alert-container', 'error', 'Error de conexión');
+      } finally {
+        btn.disabled = false;
+        btn.textContent = '🔄 Verificar Sesión';
+      }
+    }
+    
+    // Utilidades
+    function showElement(id) {
+      document.getElementById(id).classList.remove('hidden');
+    }
+    
+    function hideElement(id) {
+      document.getElementById(id).classList.add('hidden');
+    }
+    
+    function showAlert(containerId, type, message) {
+      const container = document.getElementById(containerId);
+      container.innerHTML = `<div class="alert alert-${type}">${message}</div>`;
+      
+      setTimeout(() => {
+        container.innerHTML = '';
+      }, 10000);
+    }
+    
+    function addLog(message, type = null, scroll = true) {
+      const container = document.getElementById('logs-container');
+      const entry = document.createElement('div');
+      entry.className = 'log-entry';
+      
+      if (type) {
+        entry.classList.add(type);
+      }
+      
+      const timestamp = new Date().toLocaleTimeString();
+      entry.textContent = `[${timestamp}] ${message}`;
+      
+      container.appendChild(entry);
+      
+      if (scroll) {
+        container.scrollTop = container.scrollHeight;
+      }
+      
+      // Mantener solo últimos 100 logs en UI
+      while (container.children.length > 100) {
+        container.removeChild(container.firstChild);
+      }
+    }
+    
+    // Inicializar
+    connectWebSocket();
+    
+    // Polling para estado cada 5 segundos
+    setInterval(async () => {
+      try {
+        const response = await fetch('/api/status');
+        const data = await response.json();
+        updateWhatsAppState(data.whatsapp);
+        updateGlpiState(data.glpi);
+      } catch (err) {
+        console.error('Error polling status:', err);
+      }
+    }, 5000);
+  </script>
+</body>
+</html>

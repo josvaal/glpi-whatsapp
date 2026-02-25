@@ -5,6 +5,17 @@ import dotenv from "dotenv";
 
 dotenv.config();
 
+export type WebServerConfig = {
+  enabled: boolean;
+  port: number;
+};
+
+export type GlpiWebConfig = {
+  useWebApi: boolean;
+  cookieFile: string;
+  loginUrl: string;
+};
+
 export type WhatsappConfig = {
   groupName: string;
   sessionDir: string;
@@ -17,6 +28,8 @@ export type GlpiConfig = {
   baseUrl: string | null;
   user: string;
   password: string;
+  userToken: string;
+  appToken: string;
   defaultRequester: string;
   dniFieldIds: string[];
   profileId: string;
@@ -35,6 +48,8 @@ export type TechnicianInfo = {
 export type AppConfig = {
   whatsapp: WhatsappConfig;
   glpi: GlpiConfig;
+  glpiWeb: GlpiWebConfig;
+  webServer: WebServerConfig;
   categoriesPath: string;
   defaultCategoryId: number;
   techniciansByPhone: Record<string, TechnicianInfo>;
@@ -60,6 +75,16 @@ function normalizeGlpiBaseUrl(value: string | undefined): string | null {
     base = `${base}/apirest.php`;
   }
   return base;
+}
+
+function normalizeGlpiLoginUrl(value: string | undefined, baseUrl: string | null): string {
+  if (value && value.trim()) {
+    return value.trim();
+  }
+  if (baseUrl) {
+    return baseUrl.replace('/apirest.php', '') + '/front/login.php';
+  }
+  return '';
 }
 
 function normalizePhone(value: string): string {
@@ -149,6 +174,8 @@ export function loadConfig(): AppConfig {
   const glpiBaseUrl = normalizeGlpiBaseUrl(process.env.GLPI_BASE_URL);
   const glpiUser = (process.env.GLPI_USER || "").trim();
   const glpiPassword = (process.env.GLPI_PASSWORD || "").trim();
+  const glpiUserToken = (process.env.GLPI_USER_TOKEN || "").trim();
+  const glpiAppToken = (process.env.GLPI_APP_TOKEN || "").trim();
   const glpiDefaultRequester = (process.env.GLPI_DEFAULT_REQUESTER || "").trim();
   const glpiProfileId = (process.env.GLPI_PROFILE_ID || "").trim();
   const glpiProfileName = (process.env.GLPI_PROFILE_NAME || "OPERADOR").trim();
@@ -158,7 +185,7 @@ export function loadConfig(): AppConfig {
     .split(",")
     .map((value) => value.trim())
     .filter((value) => value.length > 0);
-  const glpiEnabled = Boolean(glpiBaseUrl && glpiUser && glpiPassword);
+  const glpiEnabled = Boolean(glpiBaseUrl && (glpiUserToken || (glpiUser && glpiPassword)));
 
   const defaultCategoryIdRaw = Number(
     process.env.GLPI_DEFAULT_CATEGORY_ID || "1"
@@ -166,6 +193,15 @@ export function loadConfig(): AppConfig {
   const defaultCategoryId = Number.isNaN(defaultCategoryIdRaw)
     ? 1
     : defaultCategoryIdRaw;
+
+  // Web Server config
+  const webServerEnabled = envBool(process.env.WEB_SERVER_ENABLED, false);
+  const webServerPort = Number(process.env.WEB_SERVER_PORT || "3000");
+
+  // GLPI Web API config
+  const glpiUseWebApi = envBool(process.env.GLPI_USE_WEB_API, false);
+  const glpiCookieFile = process.env.GLPI_COOKIE_FILE || path.join(process.cwd(), ".glpi_cookies.json");
+  const glpiLoginUrl = normalizeGlpiLoginUrl(process.env.GLPI_LOGIN_URL, glpiBaseUrl);
 
   let techniciansByPhone: Record<string, TechnicianInfo> = {};
   const techniciansRaw = (process.env.TECHNICIAN_BY_PHONE || "").trim();
@@ -206,6 +242,8 @@ export function loadConfig(): AppConfig {
       baseUrl: glpiBaseUrl,
       user: glpiUser,
       password: glpiPassword,
+      userToken: glpiUserToken,
+      appToken: glpiAppToken,
       defaultRequester: glpiDefaultRequester,
       dniFieldIds,
       profileId: glpiProfileId,
@@ -213,6 +251,15 @@ export function loadConfig(): AppConfig {
       searchProfileId: glpiSearchProfileId,
       searchProfileName: glpiSearchProfileName,
       enabled: glpiEnabled,
+    },
+    glpiWeb: {
+      useWebApi: glpiUseWebApi,
+      cookieFile: glpiCookieFile,
+      loginUrl: glpiLoginUrl,
+    },
+    webServer: {
+      enabled: webServerEnabled,
+      port: webServerPort,
     },
     categoriesPath,
     defaultCategoryId,

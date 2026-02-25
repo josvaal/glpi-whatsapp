@@ -638,6 +638,11 @@ export class TicketFlow {
       const problem = session.draft.problema || "";
       const title = buildTicketTitle(problem);
       const content = buildTicketContent(session.draft);
+      console.log(`🎫 Creando ticket en GLPI: ${title}`);
+      console.log(`   - RequesterId: ${requesterId}`);
+      console.log(`   - AssigneeId: ${assigneeId || 'N/A'}`);
+      console.log(`   - CategoryId: ${this.options.defaultCategoryId}`);
+      
       const ticketId = await this.glpi.createTicket({
         title,
         content,
@@ -645,6 +650,8 @@ export class TicketFlow {
         requesterId,
         assigneeId,
       });
+      console.log(`   - Respuesta GLPI: ${ticketId ? `ID=${ticketId}` : 'null'}`);
+      
       if (!ticketId) {
         await tryReact(message, "❌");
         await message.reply("GLPI no devolvio ID de ticket.");
@@ -656,6 +663,10 @@ export class TicketFlow {
       return true;
     } catch (err) {
       const messageText = err instanceof Error ? err.message : String(err);
+      console.error(`❌ Error en createTicket: ${messageText}`);
+      if (err instanceof Error && err.stack) {
+        console.error(`Stack: ${err.stack}`);
+      }
       await tryReact(message, "❌");
       await message.reply(`Error al crear ticket: ${messageText}`);
       return false;

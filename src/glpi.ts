@@ -58,6 +58,7 @@ export type GlpiDocumentInput = {
 export class GlpiClient {
   private baseUrl: string | null;
   private authHeader: string;
+  private appTokenHeader: string;
   private defaultRequester: string;
   private dniFieldIds: string[];
   private profileId: string;
@@ -95,15 +96,20 @@ export class GlpiClient {
     }
     this.dniFieldIds = config.dniFieldIds.filter((id) => /^\d+$/.test(id));
     this.enabled = config.enabled;
+    
+    // Configurar autenticación: User Token优先 sobre Basic Auth
     this.authHeader = this.enabled
-      ? `Basic ${Buffer.from(`${config.user}:${config.password}`).toString(
-          "base64"
-        )}`
+      ? config.userToken
+        ? `user_token ${config.userToken}`
+        : `Basic ${Buffer.from(`${config.user}:${config.password}`).toString("base64")}`
       : "";
+    
+    // Configurar App-Token si está presente
+    this.appTokenHeader = this.enabled && config.appToken ? config.appToken : "";
 
     if (!this.enabled) {
       console.warn(
-        "GLPI deshabilitado: faltan GLPI_BASE_URL, GLPI_USER o GLPI_PASSWORD."
+        "GLPI deshabilitado: faltan GLPI_BASE_URL, GLPI_USER_TOKEN o (GLPI_USER + GLPI_PASSWORD)."
       );
     }
   }
@@ -130,14 +136,18 @@ export class GlpiClient {
     if (!this.enabled || !this.baseUrl) {
       throw new Error("GLPI no esta configurado.");
     }
+    const headers: Record<string, string> = {
+      Authorization: this.authHeader,
+      Accept: "application/json",
+    };
+    if (this.appTokenHeader) {
+      headers["App-Token"] = this.appTokenHeader;
+    }
     const response = await fetch(
       `${this.baseUrl}/initSession?get_full_session=true`,
       {
         method: "GET",
-        headers: {
-          Authorization: this.authHeader,
-          Accept: "application/json",
-        },
+        headers,
       }
     );
 
@@ -400,6 +410,9 @@ export class GlpiClient {
       "Session-Token": sessionToken,
       Accept: "application/json",
     };
+    if (this.appTokenHeader) {
+      headers["App-Token"] = this.appTokenHeader;
+    }
     let body: string | undefined;
     if (options.body !== undefined) {
       headers["Content-Type"] = "application/json";
@@ -508,6 +521,9 @@ export class GlpiClient {
       "Session-Token": sessionToken,
       Accept: "application/json",
     };
+    if (this.appTokenHeader) {
+      headers["App-Token"] = this.appTokenHeader;
+    }
 
     const response = await fetch(`${this.baseUrl}/${path}`, {
       method: "POST",
@@ -1484,12 +1500,17 @@ export class GlpiClient {
         : Number(input.assigneeId);
     }
 
+    console.log(`📡 Enviando request a GLPI/Ticket...`);
+    console.log(`   - Payload: ${JSON.stringify(payload, null, 2)}`);
+    
     const response = await this.request("Ticket", {
       method: "POST",
       body: { input: payload },
       useProfile: true,
     });
 
+    console.log(`📥 Respuesta de GLPI: ${JSON.stringify(response, null, 2)}`);
+    
     const data = response as Record<string, unknown> | null;
     const ticketId = data?.id ?? data?.message ?? null;
     return ticketId ? String(ticketId) : null;
