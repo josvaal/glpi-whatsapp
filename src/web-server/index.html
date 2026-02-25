@@ -1052,6 +1052,10 @@
           updateGlpiState(data.status);
           addLog('GLPI: Sesión cerrada', 'info');
           break;
+        case 'glpi-state-change':
+          updateGlpiState(data.status);
+          addLog('GLPI: Estado actualizado', 'info');
+          break;
         case 'log':
           addLog(data.message, null, false);
           break;

@@ -1,6 +1,7 @@
 import fs from "fs";
 import path from "path";
 import puppeteer, { Browser, Page } from "puppeteer";
+import type { GlpiUserCandidate } from "./types";
 
 // Ignorar errores de certificado SSL para GLPI
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
@@ -238,19 +239,22 @@ export class GlpiWebClient {
   async submitMfaCodeHttp(code: string): Promise<{ success: boolean; error?: string }> {
     try {
       console.log('🔢 Enviando código MFA:', code);
-      
+
       if (this.loginState.step !== 'awaiting-mfa') {
         return { success: false, error: 'No hay un login pendiente. Inicia el login primero.' };
       }
-      
+
       const mfaPayload = new URLSearchParams({
         _glpi_csrf_token: this.loginState.csrfToken || '',
         code: code,
         submit: '',
       });
-      
+
       const cookieHeader = `glpi_cc188a941720df9f577e8405f6df8e6e=${this.loginState.sessionCookie || ''}`;
-      
+
+      console.log('   CSRF token:', (this.loginState.csrfToken || '').substring(0, 20) + '...');
+      console.log('   Session cookie:', (this.loginState.sessionCookie || '').substring(0, 10) + '...');
+
       const mfaResponse = await fetch(`${this.baseUrl}/plugins/mfa/front/mfa.form.php`, {
         method: 'POST',
         headers: {
@@ -262,12 +266,15 @@ export class GlpiWebClient {
         body: mfaPayload,
         redirect: 'manual',
       });
-      
-      // Verificar redirect a central.php (login exitoso)
+
+      console.log('   Respuesta MFA status:', mfaResponse.status);
       const location = mfaResponse.headers.get('location');
-      if (location && location.includes('central.php')) {
-        console.log('✅ Código MFA aceptado, login completado');
-        
+      console.log('   Redirect location:', location);
+
+      // Verificar redirect a central.php (login exitoso)
+      if (location && (location.includes('central.php') || location.includes('/front/'))) {
+        console.log('✅ Código MFA aceptado, login completado (redirect)');
+
         // Extraer cookie de sesión final
         const newSetCookie = mfaResponse.headers.get('set-cookie');
         if (newSetCookie) {
@@ -291,12 +298,90 @@ export class GlpiWebClient {
             console.log('🍪 Cookies guardadas');
           }
         }
-        
+
         this.loginState = { step: 'completed' };
         return { success: true };
-      } else {
+      }
+
+      // Si no hay redirect, verificar el contenido de la respuesta
+      const mfaHtml = await mfaResponse.text();
+      
+      // Guardar HTML para debug
+      fs.writeFileSync('/tmp/glpi-mfa-response.html', mfaHtml);
+      console.log('   HTML guardado en /tmp/glpi-mfa-response.html');
+
+      // Verificar si hay mensaje de error en el HTML
+      const errorPatterns = [
+        /class=".*?error.*?"[^>]*>([^<]+)</i,
+        /class=".*?alert-error.*?"[^>]*>([^<]+)</i,
+        /class="center b">([^<]+)<br>/i,
+        /MFA code.*?(?:incorrect|expired|invalid)/i,
+        /código.*?(?:incorrecto|expirado|inválido)/i,
+      ];
+
+      for (const pattern of errorPatterns) {
+        const match = mfaHtml.match(pattern);
+        if (match) {
+          console.log('❌ Error encontrado en HTML:', match[1]);
+          return { success: false, error: match[1].trim() };
+        }
+      }
+
+      // Verificar si el HTML contiene formulario MFA nuevamente (código incorrecto)
+      const hasMfaForm = mfaHtml.includes('name="code"') || 
+                        mfaHtml.includes('MFA') ||
+                        mfaHtml.includes('verification code');
+      
+      if (hasMfaForm) {
+        console.log('❌ Formulario MFA presente nuevamente - código incorrecto o expirado');
         return { success: false, error: 'Código MFA incorrecto o expirado' };
       }
+
+      // Verificar éxito por contenido (si llegamos aquí y no hay error, puede ser éxito)
+      if (mfaResponse.status === 200 || mfaResponse.status === 302) {
+        console.log('✅ Código MFA aceptado (sin redirect explícito)');
+
+        // Extraer cookie de sesión final
+        const newSetCookie = mfaResponse.headers.get('set-cookie');
+        let cookieValue = '';
+        
+        if (newSetCookie) {
+          const cookieMatch = newSetCookie.match(/glpi_cc188a941720df9f577e8405f6df8e6e=([^;]+)/);
+          if (cookieMatch) {
+            cookieValue = cookieMatch[1];
+            console.log('🍪 Nueva cookie de sesión recibida');
+          }
+        }
+        
+        // Si no hay nueva cookie, usar la cookie de sesión del login inicial
+        if (!cookieValue && this.loginState.sessionCookie) {
+          cookieValue = this.loginState.sessionCookie;
+          console.log('🍪 Usando cookie de sesión del login inicial');
+        }
+        
+        if (cookieValue) {
+          this.sessionData = {
+            cookies: [{
+              name: 'glpi_cc188a941720df9f577e8405f6df8e6e',
+              value: cookieValue,
+              domain: new URL(this.baseUrl).hostname,
+              path: '/',
+              httpOnly: true,
+              secure: true,
+              sameSite: 'Lax',
+            }],
+            createdAt: Date.now(),
+            expiresAt: Date.now() + (24 * 60 * 60 * 1000),
+          };
+          await this.saveCookies();
+          console.log('🍪 Cookies guardadas');
+        }
+
+        this.loginState = { step: 'completed' };
+        return { success: true };
+      }
+
+      return { success: false, error: 'Respuesta inesperada del servidor MFA' };
     } catch (err) {
       const error = err instanceof Error ? err.message : String(err);
       console.error('❌ Error en submitMfaCodeHttp:', error);
@@ -604,70 +689,6 @@ export class GlpiWebClient {
     });
   }
 
-  async createTicket(title: string, content: string, categoryId: number, requesterId: string, assigneeId?: string): Promise<string | null> {
-    if (!await this.isSessionValid()) {
-      throw new Error('Sesión de GLPI no válida. Inicia sesión nuevamente.');
-    }
-
-    const payload = {
-      input: {
-        name: title,
-        content: content,
-        itilcategories_id: categoryId,
-        _users_id_requester: Number.isNaN(Number(requesterId)) ? requesterId : Number(requesterId),
-        ...(assigneeId && { _users_id_assign: Number.isNaN(Number(assigneeId)) ? assigneeId : Number(assigneeId) }),
-      },
-    };
-
-    const response = await this.fetchWithCookies(`${this.baseUrl}/apirest.php/Ticket`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(payload),
-    });
-
-    const data = await response.json();
-    
-    if (!response.ok) {
-      throw new Error(`GLPI error: ${JSON.stringify(data)}`);
-    }
-
-    return data?.id ? String(data.id) : null;
-  }
-
-  async searchUsers(query: string): Promise<unknown[]> {
-    if (!await this.isSessionValid()) {
-      throw new Error('Sesión de GLPI no válida. Inicia sesión nuevamente.');
-    }
-
-    const params = new URLSearchParams({
-      searchText: query,
-      range: '0-50',
-    });
-
-    const response = await this.fetchWithCookies(`${this.baseUrl}/apirest.php/search/User?${params}`);
-    const data = await response.json();
-
-    if (!response.ok) {
-      throw new Error(`GLPI error: ${JSON.stringify(data)}`);
-    }
-
-    return Array.isArray(data) ? data : data?.data || [];
-  }
-
-  async findUsersByDni(dni: string): Promise<unknown[]> {
-    return this.searchUsers(dni);
-  }
-
-  async findUsersByName(name: string): Promise<unknown[]> {
-    return this.searchUsers(name);
-  }
-
-  private sleep(ms: number): Promise<void> {
-    return new Promise(resolve => setTimeout(resolve, ms));
-  }
-
   getSessionStatus(): { isValid: boolean; expiresAt?: number; userId?: string } {
     if (!this.sessionData) {
       return { isValid: false };
@@ -678,4 +699,156 @@ export class GlpiWebClient {
       userId: this.sessionData.userId,
     };
   }
+
+  private sleep(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  // Métodos compatibles con GlpiClient para TicketFlow
+  isEnabled(): boolean {
+    return true;
+  }
+
+  async resolveDefaultRequesterId(): Promise<string | null> {
+    // En modo Web API, usamos el userId de la sesión
+    if (this.sessionData?.userId) {
+      return this.sessionData.userId;
+    }
+    return null;
+  }
+
+  async findUsersByDni(dni: string): Promise<GlpiUserCandidate[]> {
+    // Implementar búsqueda de usuarios por DNI usando la sesión web
+    // Por ahora retornamos vacío - se puede implementar con puppeteer si es necesario
+    console.log('🔍 Buscando usuario por DNI:', dni);
+    return [];
+  }
+
+  async findUsersByName(name: string, strict: boolean = true): Promise<GlpiUserCandidate[]> {
+    // Implementar búsqueda de usuarios por nombre usando la sesión web
+    console.log('🔍 Buscando usuario por nombre:', name, strict ? '(estricto)' : '(flexible)');
+    return [];
+  }
+
+  async createTicket(input: {
+    title: string;
+    content: string;
+    categoryId: number;
+    requesterId: string;
+    assigneeId?: string;
+  }): Promise<string | null> {
+    if (!await this.isSessionValid()) {
+      throw new Error('Sesión de GLPI no válida. Inicia sesión nuevamente.');
+    }
+
+    const cookieHeader = this.sessionData!.cookies
+      .map(c => `${c.name}=${c.value}`)
+      .join('; ');
+
+    const payload = {
+      input: {
+        name: input.title,
+        content: input.content,
+        itilcategories_id: input.categoryId,
+        _users_id_requester: Number.isNaN(Number(input.requesterId)) ? input.requesterId : Number(input.requesterId),
+        ...(input.assigneeId && { _users_id_assign: Number.isNaN(Number(input.assigneeId)) ? input.assigneeId : Number(input.assigneeId) }),
+      },
+    };
+
+    const response = await fetch(`${this.baseUrl}/apirest.php/Ticket`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Cookie': cookieHeader,
+        'Accept': 'application/json',
+      },
+      body: JSON.stringify(payload),
+    });
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      throw new Error(`GLPI error: ${JSON.stringify(data)}`);
+    }
+
+    return data?.id ? String(data.id) : null;
+  }
+
+  async addDocumentToTicket(
+    ticketId: string,
+    input: { name: string; filename: string; mime: string; base64: string }
+  ): Promise<void> {
+    if (!await this.isSessionValid()) {
+      throw new Error('Sesión de GLPI no válida. Inicia sesión nuevamente.');
+    }
+
+    const cookieHeader = this.sessionData!.cookies
+      .map(c => `${c.name}=${c.value}`)
+      .join('; ');
+
+    const payload = {
+      input: {
+        items_id: ticketId,
+        itemtype: 'Ticket',
+        name: input.name,
+        filename: input.filename,
+        mime: input.mime,
+        _data: input.base64,
+      },
+    };
+
+    const response = await fetch(`${this.baseUrl}/apirest.php/Document`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Cookie': cookieHeader,
+        'Accept': 'application/json',
+      },
+      body: JSON.stringify(payload),
+    });
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      throw new Error(`GLPI error: ${JSON.stringify(data)}`);
+    }
+
+    // Asociar documento al ticket
+    const documentId = data?.id;
+    if (documentId) {
+      await this.linkDocumentToTicket(ticketId, documentId, cookieHeader);
+    }
+  }
+
+  private async linkDocumentToTicket(
+    ticketId: string,
+    documentId: string,
+    cookieHeader: string
+  ): Promise<void> {
+    const payload = {
+      input: {
+        items_id: ticketId,
+        itemtype: 'Ticket',
+        documents_id: documentId,
+      },
+    };
+
+    const response = await fetch(`${this.baseUrl}/apirest.php/Document_Ticket`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Cookie': cookieHeader,
+        'Accept': 'application/json',
+      },
+      body: JSON.stringify(payload),
+    });
+
+    if (!response.ok) {
+      const data = await response.json();
+      throw new Error(`GLPI error al vincular documento: ${JSON.stringify(data)}`);
+    }
+  }
 }
+
+// Exportar tipo para compatibilidad
+export type { GlpiUserCandidate };

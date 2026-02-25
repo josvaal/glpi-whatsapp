@@ -152,12 +152,17 @@ async function start(
       if (!sock || !activeGroupId) {
         return;
       }
+      console.log(`📨 messages.upsert: ${upsert.messages.length} mensaje(s), activeGroupId: ${activeGroupId}`);
       for (const msg of upsert.messages) {
+        console.log(`   - Mensaje recibido: remoteJid=${msg.key.remoteJid}, fromMe=${msg.key.fromMe}`);
         if (!msg.message) {
+          console.log('     ⚠️ Sin mensaje, ignorando...');
           continue;
         }
         const chatId = msg.key.remoteJid || "";
+        console.log(`   - chatId: ${chatId}, activeGroupId: ${activeGroupId}, match: ${chatId === activeGroupId}`);
         if (chatId !== activeGroupId) {
+          console.log('     ⚠️ chatId no coincide con activeGroupId, ignorando...');
           continue;
         }
         if (!shouldProcessMessage(msg, ignoredMessageIds, outgoingBodies, seenMessageIds)) {

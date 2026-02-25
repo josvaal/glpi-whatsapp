@@ -8,19 +8,22 @@ import type { AppConfig } from "./config";
 import { GlpiWebClient } from "./glpi-web";
 import { WhatsAppManager } from "./whatsapp-manager";
 
+// Tipo union para aceptar ambos clientes GLPI
+type GlpiClientType = GlpiWebClient | null;
+
 export class WebServer {
   private app: express.Application;
   private server: http.Server;
   private wss: WebSocketServer;
   private port: number;
-  private glpiClient: GlpiWebClient | null;
+  private glpiClient: GlpiClientType;
   private whatsappManager: WhatsAppManager;
   private clients: Set<WebSocket> = new Set();
   private logs: string[] = [];
 
   constructor(
     config: AppConfig,
-    glpiClient: GlpiWebClient | null,
+    glpiClient: GlpiClientType,
     whatsappManager: WhatsAppManager
   ) {
     this.port = config.webServer.port;
@@ -114,14 +117,17 @@ export class WebServer {
       try {
         this.log("🔐 Iniciando login de GLPI con credenciales...");
         const state = await this.glpiClient.startLoginWithMfa();
-        
+
         if (state.step === 'awaiting-mfa') {
           this.log("✅ Login inicial exitoso, esperando código MFA");
+          this.onGlpiStateChange(); // Notificar cambio de estado
           res.json({ success: true, step: 'awaiting-mfa' });
         } else if (state.step === 'error') {
           this.log(`❌ Error en login GLPI: ${state.error}`);
+          this.onGlpiStateChange();
           res.status(400).json({ success: false, error: state.error });
         } else {
+          this.onGlpiStateChange();
           res.json({ success: true, step: state.step });
         }
       } catch (err) {
@@ -150,6 +156,7 @@ export class WebServer {
 
         if (result.success) {
           this.log("✅ Código MFA aceptado, sesión guardada");
+          this.onGlpiStateChange(); // Notificar cambio de estado
           this.broadcast({ type: "glpi-login-success", status: this.glpiClient.getSessionStatus() });
         } else {
           this.log(`❌ Error con código MFA: ${result.error}`);
@@ -229,6 +236,7 @@ export class WebServer {
       try {
         await this.glpiClient.logout();
         this.log("🚪 Sesión de GLPI cerrada");
+        this.onGlpiStateChange(); // Notificar cambio de estado
         this.broadcast({ type: "glpi-logout", status: { isValid: false } });
         res.json({ success: true });
       } catch (err) {
@@ -333,5 +341,11 @@ export class WebServer {
   // Called from WhatsApp manager events
   onWhatsAppStateChange(): void {
     this.broadcast({ type: "whatsapp-state", state: this.whatsappManager.getState() });
+  }
+
+  // Método para notificar cambio de estado de GLPI
+  onGlpiStateChange(): void {
+    const glpiStatus = this.glpiClient ? this.glpiClient.getSessionStatus() : { isValid: false };
+    this.broadcast({ type: "glpi-state-change", status: glpiStatus });
   }
 }
