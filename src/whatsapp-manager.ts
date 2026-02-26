@@ -558,37 +558,52 @@ export class WhatsAppManager {
             return null;
           },
           reply: async (text: string) => {
-            console.log(`   📤 [reply] INICIO - text="${text.substring(0, 50)}..."`);
-            
             if (!this.socket) {
-              console.log(`   ❌ [reply] Socket es null`);
+              console.log(`   ❌ [reply] Socket no disponible`);
               return;
             }
+            console.log(`   📤 [reply] INICIO - text="${text.substring(0, 50)}..."`);
+            console.log(`   📤 [reply] this.socket=✅ disponible`);
+            console.log(`   📤 [reply] chatId="${chatId}"`);
+            console.log(`   📤 [reply] id="${id}"`);
             
             ignoredMessageIds.add(id);
             
-            try {
-              // Intentar con quoted message (requerido en grupos)
-              console.log(`   📤 [reply] Enviando con quoted...`);
-              const sent = await this.socket.sendMessage(chatId, { 
-                text,
-                quoted: { key: { id, remoteJid: chatId, fromMe: false, participant: senderId } }
-              });
-              
-              if (sent?.key?.id) {
-                ignoredMessageIds.add(sent.key.id);
-                console.log(`   ✅ [reply] ENVIADO CON ÉXITO`);
-              }
-            } catch (err) {
-              console.log(`   ⚠️ [reply] Falló con quoted, intentando sin quoted...`);
+            // Timeout configurable - aumentar a 30 segundos para grupos
+            const SEND_TIMEOUT = 30000;
+            const MAX_RETRIES = 3;
+            const BASE_DELAY = 1000; // 1 segundo
+            
+            for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
               try {
-                const sent = await this.socket.sendMessage(chatId, { text });
-                if (sent?.key?.id) {
-                  ignoredMessageIds.add(sent.key.id);
-                  console.log(`   ✅ [reply] ENVIADO SIN QUOTED`);
+                const sendPromise = this.socket.sendMessage(chatId, { text });
+                const timeoutPromise = new Promise<null>((_, reject) => 
+                  setTimeout(() => reject(new Error(`Timeout de ${SEND_TIMEOUT/1000}s`)), SEND_TIMEOUT)
+                );
+                
+                console.log(`   📤 [reply] Intento ${attempt}/${MAX_RETRIES} - Llamando a sendMessage con timeout ${SEND_TIMEOUT/1000}s...`);
+                const sent = await Promise.race([sendPromise, timeoutPromise]);
+                const sentId = sent?.key?.id;
+                if (sentId) {
+                  ignoredMessageIds.add(sentId);
+                  console.log(`   ✅ [reply] MENSAJE ENVIADO - sentId="${sentId}"`);
+                  return; // Éxito, salir del loop
+                } else {
+                  console.log(`   ⚠️ [reply] MENSAJE enviado pero sin ID`);
+                  return;
                 }
-              } catch (err2) {
-                console.error(`   ❌ [reply] ERROR: ${err2 instanceof Error ? err2.message : String(err2)}`);
+              } catch (err) {
+                const errorMsg = err instanceof Error ? err.message : String(err);
+                console.error(`   ❌ [reply] ERROR en intento ${attempt}: ${errorMsg}`);
+                
+                if (attempt < MAX_RETRIES) {
+                  const delay = BASE_DELAY * Math.pow(2, attempt - 1); // Exponential backoff: 1s, 2s, 4s
+                  console.log(`   ⏳ [reply] Reintentando en ${delay/1000}s...`);
+                  await new Promise(resolve => setTimeout(resolve, delay));
+                } else {
+                  console.error(`   ❌ [reply] Stack: ${err instanceof Error ? err.stack : 'N/A'}`);
+                  throw err; // Último intento fallido, propagar error
+                }
               }
             }
           },
