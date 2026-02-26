@@ -7,7 +7,7 @@
   "scripts": {
     "build": "tsc && npm run copy:static",
     "copy:static": "mkdir -p dist/web-server && cp src/web-server/index.html dist/web-server/",
-    "start": "rimramf ./wa_session && node dist/main.js",
+    "start": "rimraf ./wa_session && node dist/main.js",
     "dev": "rimraf ./.wa_session && ts-node src/main.ts"
   },
   "dependencies": {
