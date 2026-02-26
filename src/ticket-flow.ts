@@ -716,12 +716,19 @@ export class TicketFlow {
    * Maneja el comando de registro de técnico
    */
   private async handleRegister(message: IncomingMessage, command: CommandSpec): Promise<void> {
-    const body = stripCommandBody(message.body, command.command).trim();
+    console.log(`   📝 [handleRegister] INICIO`);
+    console.log(`      command: "${command.command}"`);
+    console.log(`      message.body: "${message.body}"`);
     
+    const body = stripCommandBody(message.body, command.command).trim();
+    console.log(`      body después de strip: "${body}"`);
+
     // Extraer número del comando: REGISTER TCK: 997314528
     const phoneMatch = body.match(/(\d{9,12})/);
-    
+    console.log(`      phoneMatch:`, phoneMatch);
+
     if (!phoneMatch) {
+      console.log(`      ❌ No se encontró número válido`);
       await message.reply(
         '❌ Formato inválido. Usa: REGISTER TCK: 997314528\n\n' +
         'Ejemplo: REGISTER TCK: 997314528'
@@ -732,12 +739,18 @@ export class TicketFlow {
     const phone = phoneMatch[1];
     const whatsappId = message.senderId || '';
     const name = message.senderLabel || null;
+    
+    console.log(`      phone: "${phone}"`);
+    console.log(`      whatsappId: "${whatsappId}"`);
+    console.log(`      name: "${name}"`);
 
     try {
       const db = getDatabase();
+      console.log(`      📊 Verificando si ya existe...`);
       const existing = db.getTechnicianByWhatsAppId(whatsappId);
 
       if (existing) {
+        console.log(`      ℹ️ Ya está registrado`);
         await message.reply(
           `✅ Ya estás registrado con el número ${existing.phone}.\n\n` +
           `Ahora puedes usar: OPEN TCK: ...`
@@ -745,7 +758,9 @@ export class TicketFlow {
         return;
       }
 
+      console.log(`      💾 Registrando nuevo técnico...`);
       db.registerTechnician(whatsappId, phone, name);
+      console.log(`      ✅ Registrado en DB`);
 
       await message.reply(
         `✅ ¡Registro exitoso!\n\n` +
@@ -753,10 +768,14 @@ export class TicketFlow {
         `👤 Nombre: ${name || 'Sin nombre'}\n\n` +
         `Ahora puedes crear tickets con: OPEN TCK: ...`
       );
+      console.log(`      ✅ Mensaje de éxito enviado`);
 
       console.log(`✅ Técnico registrado: ${name} (${phone}) - WhatsApp ID: ${whatsappId}`);
     } catch (err) {
-      console.error(`❌ Error al registrar: ${err instanceof Error ? err.message : String(err)}`);
+      console.error(`   ❌ [handleRegister] ERROR: ${err instanceof Error ? err.message : String(err)}`);
+      if (err instanceof Error && err.stack) {
+        console.error(`      Stack: ${err.stack}`);
+      }
       await message.reply('❌ Error al registrar. Intenta nuevamente.');
     }
   }
