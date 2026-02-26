@@ -585,26 +585,45 @@ export class WhatsAppManager {
             
             for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
               try {
-                const sendPromise = this.socket.sendMessage(chatId, { text });
-                const timeoutPromise = new Promise<null>((_, reject) => 
-                  setTimeout(() => reject(new Error(`Timeout de ${SEND_TIMEOUT/1000}s`)), SEND_TIMEOUT)
-                );
-                
-                console.log(`   📤 [reply] Intento ${attempt}/${MAX_RETRIES} - Llamando a sendMessage con timeout ${SEND_TIMEOUT/1000}s...`);
+                console.log(`   📤 [reply] Intento ${attempt}/${MAX_RETRIES} - Creando sendPromise...`);
+                const sendPromise = this.socket.sendMessage(chatId, { text })
+                  .then(result => {
+                    console.log(`   📤 [reply] sendPromise RESUELTO`);
+                    return result;
+                  })
+                  .catch(err => {
+                    console.error(`   📤 [reply] sendPromise RECHAZADO:`, err);
+                    throw err;
+                  });
+
+                console.log(`   📤 [reply] Intento ${attempt}/${MAX_RETRIES} - Creando timeoutPromise...`);
+                const timeoutPromise = new Promise<null>((_, reject) => {
+                  const timeoutId = setTimeout(() => {
+                    console.log(`   📤 [reply] TIMEOUT disparado después de ${SEND_TIMEOUT/1000}s`);
+                    reject(new Error(`Timeout de ${SEND_TIMEOUT/1000}s`));
+                  }, SEND_TIMEOUT);
+                  // Cleanup si sendPromise resuelve primero
+                  sendPromise.finally(() => clearTimeout(timeoutId));
+                });
+
+                console.log(`   📤 [reply] Intento ${attempt}/${MAX_RETRIES} - Esperando Promise.race...`);
                 const sent = await Promise.race([sendPromise, timeoutPromise]);
+
+                console.log(`   📤 [reply] Promise.race completado, extrayendo ID...`);
                 const sentId = sent?.key?.id;
                 if (sentId) {
                   ignoredMessageIds.add(sentId);
                   console.log(`   ✅ [reply] MENSAJE ENVIADO - sentId="${sentId}"`);
                   return; // Éxito, salir del loop
                 } else {
-                  console.log(`   ⚠️ [reply] MENSAJE enviado pero sin ID`);
+                  console.log(`   ⚠️ [reply] MENSAJE enviado pero sin ID. Resultado:`, sent);
                   return;
                 }
               } catch (err) {
                 const errorMsg = err instanceof Error ? err.message : String(err);
                 console.error(`   ❌ [reply] ERROR en intento ${attempt}: ${errorMsg}`);
-                
+                console.error(`   ❌ [reply] Error tipo: ${err instanceof Error ? err.name : typeof err}`);
+
                 if (attempt < MAX_RETRIES) {
                   const delay = BASE_DELAY * Math.pow(2, attempt - 1); // Exponential backoff: 1s, 2s, 4s
                   console.log(`   ⏳ [reply] Reintentando en ${delay/1000}s...`);
