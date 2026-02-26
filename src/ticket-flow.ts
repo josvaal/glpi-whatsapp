@@ -716,10 +716,14 @@ export class TicketFlow {
    * Maneja el comando de registro de técnico
    */
   private async handleRegister(message: IncomingMessage, command: CommandSpec): Promise<void> {
+    console.log(`\n${'='.repeat(60)}`);
     console.log(`   📝 [handleRegister] INICIO`);
+    console.log(`${'='.repeat(60)}`);
     console.log(`      command: "${command.command}"`);
     console.log(`      message.body: "${message.body}"`);
-    
+    console.log(`      message.senderId: "${message.senderId}"`);
+    console.log(`      message.reply: ${typeof message.reply}`);
+
     const body = stripCommandBody(message.body, command.command).trim();
     console.log(`      body después de strip: "${body}"`);
 
@@ -729,32 +733,39 @@ export class TicketFlow {
 
     if (!phoneMatch) {
       console.log(`      ❌ No se encontró número válido`);
+      console.log(`      📤 Enviando reply: formato inválido`);
       await message.reply(
         '❌ Formato inválido. Usa: REGISTER TCK: 997314528\n\n' +
         'Ejemplo: REGISTER TCK: 997314528'
       );
+      console.log(`      ✅ Reply enviado (formato inválido)`);
       return;
     }
 
     const phone = phoneMatch[1];
     const whatsappId = message.senderId || '';
     const name = message.senderLabel || null;
-    
+
     console.log(`      phone: "${phone}"`);
     console.log(`      whatsappId: "${whatsappId}"`);
     console.log(`      name: "${name}"`);
 
     try {
+      console.log(`      📊 Obteniendo database...`);
       const db = getDatabase();
+      console.log(`      📊 database obtenida`);
+      
       console.log(`      📊 Verificando si ya existe...`);
       const existing = db.getTechnicianByWhatsAppId(whatsappId);
+      console.log(`      📊 existing:`, existing ? `✅ encontrado (${existing.phone})` : '❌ no existe');
 
       if (existing) {
         console.log(`      ℹ️ Ya está registrado`);
-        await message.reply(
-          `✅ Ya estás registrado con el número ${existing.phone}.\n\n` +
-          `Ahora puedes usar: OPEN TCK: ...`
-        );
+        const replyText = `✅ Ya estás registrado con el número ${existing.phone}.\n\nAhora puedes usar: OPEN TCK: ...`;
+        console.log(`      📤 Enviando reply: "${replyText.substring(0, 50)}..."`);
+        await message.reply(replyText);
+        console.log(`      ✅ Reply enviado (ya registrado)`);
+        console.log(`${'='.repeat(60)}\n`);
         return;
       }
 
@@ -762,21 +773,24 @@ export class TicketFlow {
       db.registerTechnician(whatsappId, phone, name);
       console.log(`      ✅ Registrado en DB`);
 
-      await message.reply(
-        `✅ ¡Registro exitoso!\n\n` +
-        `📱 Número guardado: ${phone}\n` +
-        `👤 Nombre: ${name || 'Sin nombre'}\n\n` +
-        `Ahora puedes crear tickets con: OPEN TCK: ...`
-      );
-      console.log(`      ✅ Mensaje de éxito enviado`);
+      const replyText = `✅ ¡Registro exitoso!\n\n📱 Número guardado: ${phone}\n👤 Nombre: ${name || 'Sin nombre'}\n\nAhora puedes crear tickets con: OPEN TCK: ...`;
+      console.log(`      📤 Enviando reply: "${replyText.substring(0, 50)}..."`);
+      console.log(`      📤 Llamando a message.reply()...`);
+      await message.reply(replyText);
+      console.log(`      ✅ Reply enviado (registro exitoso)`);
+      console.log(`      ✅ handleRegister COMPLETADO`);
+      console.log(`${'='.repeat(60)}\n`);
 
       console.log(`✅ Técnico registrado: ${name} (${phone}) - WhatsApp ID: ${whatsappId}`);
     } catch (err) {
-      console.error(`   ❌ [handleRegister] ERROR: ${err instanceof Error ? err.message : String(err)}`);
+      console.error(`\n   ❌ [handleRegister] ERROR: ${err instanceof Error ? err.message : String(err)}`);
       if (err instanceof Error && err.stack) {
         console.error(`      Stack: ${err.stack}`);
       }
+      console.log(`      📤 Enviando reply de error...`);
       await message.reply('❌ Error al registrar. Intenta nuevamente.');
+      console.log(`      ✅ Reply de error enviado`);
+      console.log(`${'='.repeat(60)}\n`);
     }
   }
 

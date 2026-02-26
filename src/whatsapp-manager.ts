@@ -553,33 +553,45 @@ export class WhatsAppManager {
           chatId,
           hasMedia,
           mediaType,
-          getMedia: async () => null, // Implementar si es necesario
+          getMedia: async () => {
+            console.log(`   📥 [getMedia] llamado`);
+            return null;
+          },
           reply: async (text: string) => {
+            console.log(`   📤 [reply] INICIO - text="${text.substring(0, 50)}..."`);
+            console.log(`   📤 [reply] this.socket=${this.socket ? '✅ disponible' : '❌ null'}`);
+            console.log(`   📤 [reply] chatId="${chatId}"`);
+            console.log(`   📤 [reply] id="${id}"`);
+            
             if (!this.socket) {
-              console.log(`❌ [reply] Socket no disponible`);
+              console.log(`   ❌ [reply] Socket es null, retornando`);
               return;
             }
             
-            // Reintentos automáticos (3 intentos)
-            for (let attempt = 0; attempt < 3; attempt++) {
-              try {
-                ignoredMessageIds.add(id);
-                const sent = await this.socket.sendMessage(chatId, { text });
-                if (sent?.key?.id) {
-                  ignoredMessageIds.add(sent.key.id);
-                  return; // Éxito
-                }
-              } catch (err) {
-                const errorMsg = err instanceof Error ? err.message : String(err);
-                console.log(`⚠️ [reply] Intento ${attempt + 1} fallido: ${errorMsg}`);
-                
-                if (attempt === 2) {
-                  console.error(`❌ [reply] Error después de 3 intentos: ${errorMsg}`);
-                } else {
-                  // Esperar antes del próximo intento (1s, 2s, 3s)
-                  await new Promise(resolve => setTimeout(resolve, 1000 * (attempt + 1)));
-                }
+            console.log(`   📤 [reply] Agregando a ignoredMessageIds`);
+            ignoredMessageIds.add(id);
+            
+            try {
+              console.log(`   📤 [reply] Llamando a sendMessage...`);
+              const sent = await this.socket.sendMessage(chatId, { text });
+              console.log(`   📤 [reply] sendMessage retornó:`, JSON.stringify(sent?.key || null));
+              
+              const sentId = sent?.key?.id;
+              console.log(`   📤 [reply] sentId="${sentId}"`);
+              
+              if (sentId) {
+                console.log(`   📤 [reply] Agregando sentId a ignoredMessageIds`);
+                ignoredMessageIds.add(sentId);
+                console.log(`   ✅ [reply] COMPLETADO EXITOSAMENTE`);
+              } else {
+                console.log(`   ⚠️ [reply] sentId es null/undefined`);
               }
+            } catch (err) {
+              console.error(`   ❌ [reply] ERROR en sendMessage: ${err instanceof Error ? err.message : String(err)}`);
+              if (err instanceof Error && err.stack) {
+                console.error(`   ❌ [reply] Stack: ${err.stack}`);
+              }
+              throw err; // Re-lanzar para que handleRegister lo capture
             }
           },
           react: async (emoji: string) => {
