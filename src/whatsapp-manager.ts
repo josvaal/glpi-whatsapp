@@ -352,13 +352,6 @@ export class WhatsAppManager {
         }
       });
 
-      this.socket.ev.on("contacts.upsert", (contacts: Contact[]) => {
-        console.log(`📇 [CONTACTS.UPSERT] ${contacts.length} contacto(s)`);
-        for (const contact of contacts) {
-          this.contactsStore.set(contact.id, contact);
-          console.log(`   └─ Guardado: id="${contact.id}", notify="${contact.notify}", name="${contact.name}"`);
-        }
-      });
 
       this.socket.ev.on("contacts.update", (contacts: Partial<Contact>[]) => {
         console.log(`📇 [CONTACTS.UPDATE] ${contacts.length} contacto(s)`);
