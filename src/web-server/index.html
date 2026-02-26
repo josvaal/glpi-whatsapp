@@ -1088,8 +1088,14 @@
         statusText.textContent = 'Escanea QR';
         showElement(SELECTORS.whatsappQrContainer);
 
-        const qrApiUrl = `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(state.qrCode)}`;
-        qrDiv.innerHTML = `<img src="${qrApiUrl}" alt="QR Code">`;
+        // Si el QR es una data URL (comienza con data:image), usarla directamente
+        if (state.qrCode.startsWith('data:image')) {
+          qrDiv.innerHTML = `<img src="${state.qrCode}" alt="QR Code" style="max-width: 200px; height: auto;">`;
+        } else {
+          // Si no, usar la API externa para generar el QR
+          const qrApiUrl = `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(state.qrCode)}`;
+          qrDiv.innerHTML = `<img src="${qrApiUrl}" alt="QR Code">`;
+        }
         hideElement(SELECTORS.whatsappUserInfo);
         hideElement(SELECTORS.whatsappError);
       } else {
