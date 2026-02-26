@@ -566,12 +566,12 @@ export class WhatsAppManager {
             console.log(`   📤 [reply] this.socket=✅ disponible`);
             console.log(`   📤 [reply] chatId="${chatId}"`);
             console.log(`   📤 [reply] id="${id}"`);
-            
-            // Verificar estado de la conexión
-            const connState = (this.socket as any).connectionState as WAConnectionState;
-            console.log(`   📤 [reply] connectionState="${connState}"`);
-            
-            if (connState !== 'open') {
+
+            // Verificar estado de la conexión usando el estado interno de la clase
+            const connState = this.state.isConnected ? 'open' : 'closed';
+            console.log(`   📤 [reply] connectionState="${connState}" (isConnected=${this.state.isConnected})`);
+
+            if (!this.state.isConnected) {
               console.error(`   ❌ [reply] Conexión no está abierta (estado: ${connState})`);
               throw new Error(`Conexión no lista: ${connState}`);
             }
