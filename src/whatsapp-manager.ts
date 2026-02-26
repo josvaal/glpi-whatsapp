@@ -567,6 +567,15 @@ export class WhatsAppManager {
             console.log(`   📤 [reply] chatId="${chatId}"`);
             console.log(`   📤 [reply] id="${id}"`);
             
+            // Verificar estado de la conexión
+            const connState = (this.socket as any).connectionState as WAConnectionState;
+            console.log(`   📤 [reply] connectionState="${connState}"`);
+            
+            if (connState !== 'open') {
+              console.error(`   ❌ [reply] Conexión no está abierta (estado: ${connState})`);
+              throw new Error(`Conexión no lista: ${connState}`);
+            }
+            
             ignoredMessageIds.add(id);
             
             // Timeout configurable - aumentar a 30 segundos para grupos
