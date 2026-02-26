@@ -2,7 +2,7 @@
   "cookies": [
     {
       "name": "glpi_cc188a941720df9f577e8405f6df8e6e",
-      "value": "k50m7f3ova8nrvbt480cn77b41",
+      "value": "gr0rktj18gvr8q3opsiqc65tjo",
       "domain": "portalogti.mpfn.gob.pe",
       "path": "/",
       "httpOnly": true,
@@ -10,6 +10,6 @@
       "sameSite": "Lax"
     }
   ],
-  "createdAt": 1772055362078,
-  "expiresAt": 1772141762078
+  "createdAt": 1772134131730,
+  "expiresAt": 1772220531730
 }

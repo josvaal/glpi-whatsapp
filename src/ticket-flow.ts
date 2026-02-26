@@ -9,6 +9,7 @@ import type { TechnicianInfo } from "./config";
 import { normalizeText } from "./text";
 import { parseTicketText } from "./ticket-parser";
 import { GlpiClient } from "./glpi";
+import { getDatabase, type Technician } from "./database";
 
 type PendingSelection = {
   role: "solicitante" | "tecnico";
@@ -54,6 +55,7 @@ type CommandSpec = {
 
 const START_COMMANDS = buildCommandSpecs(["INICIAR TICKET", "OPEN TCK"]);
 const END_COMMANDS = buildCommandSpecs(["FINALIZAR TICKET", "CLOSE TCK"]);
+const REGISTER_COMMANDS = buildCommandSpecs(["REGISTER TCK", "REGISTRAR TCK"]);
 const MAX_SELECTION_CANDIDATES = 10;
 
 function buildCommandSpecs(commands: string[]): CommandSpec[] {
@@ -294,16 +296,40 @@ export class TicketFlow {
     let session = this.sessions.get(sessionKey);
     const startCommand = matchCommand(normalized, START_COMMANDS);
     const endCommand = matchCommand(normalized, END_COMMANDS);
+    const registerCommand = matchCommand(normalized, REGISTER_COMMANDS);
     const isStart = Boolean(startCommand);
     const isEnd = Boolean(endCommand);
-    const isAuthorized = this.isAuthorizedSender(message);
+    const isRegister = Boolean(registerCommand);
+
+    console.log(`🎫 [TICKETFLOW] isStart=${isStart}, isEnd=${isEnd}, isRegister=${isRegister}`);
+    console.log(`   senderId="${message.senderId}", senderNumber="${message.senderNumber}", senderLabel="${message.senderLabel}"`);
+
+    // Manejar registro primero (no requiere autorización)
+    if (isRegister) {
+      await this.handleRegister(message, registerCommand!);
+      return;
+    }
+
+    // Verificar si está registrado en la base de datos
+    const registeredUser = this.isRegisteredUser(message.senderId || '');
+    const isAuthorized = registeredUser !== null || this.isAuthorizedSender(message);
+
+    console.log(`   🔐 isAuthorized=${isAuthorized}, registeredUser=${registeredUser ? '✅' : '❌'}`);
 
     if (!isAuthorized) {
       if (session) {
         this.sessions.delete(sessionKey);
       }
       if (isStart) {
-        await message.reply(this.buildUnauthorizedMessage(message));
+        // Mostrar mensaje de registro
+        const userPhone = message.senderNumber || message.senderLabel || 'tu número';
+        await message.reply(
+          `⚠️ *Primera vez usando el bot*\n\n` +
+          `Para usar este bot, primero debes registrarte.\n\n` +
+          `📝 Envía el siguiente comando:\n` +
+          `*REGISTER TCK: ${userPhone}*\n\n` +
+          `Ejemplo: REGISTER TCK: 997314528`
+        );
       }
       return;
     }
@@ -673,17 +699,89 @@ export class TicketFlow {
     }
   }
 
+  /**
+   * Verifica si el usuario está registrado en la base de datos
+   */
+  private isRegisteredUser(whatsappId: string): Technician | null {
+    try {
+      const db = getDatabase();
+      return db.getTechnicianByWhatsAppId(whatsappId);
+    } catch (err) {
+      console.log(`⚠️ Error al verificar registro: ${err instanceof Error ? err.message : String(err)}`);
+      return null;
+    }
+  }
+
+  /**
+   * Maneja el comando de registro de técnico
+   */
+  private async handleRegister(message: IncomingMessage, command: CommandSpec): Promise<void> {
+    const body = stripCommandBody(message.body, command.command).trim();
+    
+    // Extraer número del comando: REGISTER TCK: 997314528
+    const phoneMatch = body.match(/(\d{9,12})/);
+    
+    if (!phoneMatch) {
+      await message.reply(
+        '❌ Formato inválido. Usa: REGISTER TCK: 997314528\n\n' +
+        'Ejemplo: REGISTER TCK: 997314528'
+      );
+      return;
+    }
+
+    const phone = phoneMatch[1];
+    const whatsappId = message.senderId || '';
+    const name = message.senderLabel || null;
+
+    try {
+      const db = getDatabase();
+      const existing = db.getTechnicianByWhatsAppId(whatsappId);
+
+      if (existing) {
+        await message.reply(
+          `✅ Ya estás registrado con el número ${existing.phone}.\n\n` +
+          `Ahora puedes usar: OPEN TCK: ...`
+        );
+        return;
+      }
+
+      db.registerTechnician(whatsappId, phone, name);
+
+      await message.reply(
+        `✅ ¡Registro exitoso!\n\n` +
+        `📱 Número guardado: ${phone}\n` +
+        `👤 Nombre: ${name || 'Sin nombre'}\n\n` +
+        `Ahora puedes crear tickets con: OPEN TCK: ...`
+      );
+
+      console.log(`✅ Técnico registrado: ${name} (${phone}) - WhatsApp ID: ${whatsappId}`);
+    } catch (err) {
+      console.error(`❌ Error al registrar: ${err instanceof Error ? err.message : String(err)}`);
+      await message.reply('❌ Error al registrar. Intenta nuevamente.');
+    }
+  }
+
   private resolveTechnicianFromSender(message: MessageContext): TechnicianInfo | null {
     const senderNumber = this.resolveSenderNumber(message);
+    console.log(`   👤 [resolveTechnicianFromSender] senderNumber="${senderNumber}"`);
     if (!senderNumber) {
+      console.log(`      ❌ No se pudo resolver senderNumber`);
       return null;
     }
     const techInfo = this.options.techniciansByPhone[senderNumber];
+    if (techInfo) {
+      console.log(`      ✅ TÉCNICO: ${techInfo.name} (GLPI ID: ${techInfo.glpiId})`);
+    } else {
+      console.log(`      ❌ NO encontrado en techniciansByPhone`);
+      console.log(`         Números en mapa: ${Object.keys(this.options.techniciansByPhone).join(', ')}`);
+    }
     return techInfo || null;
   }
 
   private isAuthorizedSender(message: MessageContext): boolean {
-    return Boolean(this.resolveSenderNumber(message));
+    const result = this.resolveSenderNumber(message);
+    console.log(`   🔐 [isAuthorizedSender] ${result ? '✅ AUTORIZADO' : '❌ NO AUTORIZADO'}`);
+    return Boolean(result);
   }
 
   private buildUnauthorizedMessage(message: MessageContext): string {
@@ -698,16 +796,31 @@ export class TicketFlow {
   }
 
   private resolveSenderNumber(message: MessageContext): string | null {
+    console.log(`   🔍 [resolveSenderNumber] INICIO`);
+    console.log(`      message.senderNumber="${message.senderNumber}"`);
+    console.log(`      message.senderLabel="${message.senderLabel}"`);
+    
     const directNumber = normalizePhone(message.senderNumber);
+    console.log(`      directNumber="${directNumber}"`);
     if (directNumber && this.options.techniciansByPhone[directNumber]) {
+      console.log(`      ✅ ENCONTRADO por directNumber: ${directNumber}`);
       return directNumber;
+    } else if (directNumber) {
+      console.log(`      ❌ directNumber NO está en mapa`);
     }
 
     const label = message.senderLabel || "";
     const labelNumber = normalizePhone(label);
+    console.log(`      senderLabel="${label}" -> labelNumber="${labelNumber}"`);
     if (labelNumber && this.options.techniciansByPhone[labelNumber]) {
+      console.log(`      ✅ ENCONTRADO por senderLabel: ${labelNumber}`);
       return labelNumber;
+    } else if (labelNumber) {
+      console.log(`      ❌ labelNumber NO está en mapa`);
     }
+    
+    console.log(`      ❌ NO ENCONTRADO`);
+    console.log(`         Mapa: ${Object.keys(this.options.techniciansByPhone).join(', ')}`);
     return null;
   }
 

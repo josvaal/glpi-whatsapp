@@ -554,7 +554,7 @@ export class GlpiWebClient {
           expires: c.expires,
           httpOnly: c.httpOnly,
           secure: c.secure,
-          sameSite: c.sameSite,
+          sameSite: c.sameSite === 'Default' ? 'Lax' : c.sameSite,
         })),
         createdAt: Date.now(),
         expiresAt: Date.now() + (24 * 60 * 60 * 1000), // 24 horas

@@ -341,7 +341,7 @@ async function start(
     sock.ev.on("contacts.upsert", (contacts) => {
       for (const contact of contacts) {
         const lid = normalizeLid(contact.lid || contact.id || "");
-        const jid = contact.jid || (contact.id?.endsWith("@s.whatsapp.net") ? contact.id : null);
+        const jid = (contact as any).jid || (contact.id?.endsWith("@s.whatsapp.net") ? contact.id : null);
         if (lid && jid) {
           setLidMapping(lid, jid);
         }
@@ -560,16 +560,16 @@ async function logGroupMembers(
     const metadata = await sock.groupMetadata(id);
     const participants = metadata.participants || [];
     console.log(
-      `Miembros del grupo (${participants.length}) [modo: ${metadata.addressingMode}]:`
+      `Miembros del grupo (${participants.length}):`
     );
     for (const participant of participants) {
       const name =
         participant.name ||
         participant.notify ||
-        participant.verifiedName ||
+        (participant as any).verifiedName ||
         "Desconocido";
-      const jid = participant.jid || "-";
-      const lid = participant.lid || "-";
+      const jid = (participant as any).jid || "-";
+      const lid = (participant as any).lid || "-";
       const idValue = participant.id || jid || lid || "-";
       const number =
         jid !== "-" ? normalizePhone(extractNumber(jid)) || "-" : "-";

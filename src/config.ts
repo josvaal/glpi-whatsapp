@@ -115,11 +115,24 @@ function normalizeTechnicianMap(
         continue;
       }
 
+      // Agregar número normalizado principal
       normalized[normalizedPhone] = {
         name: nameText,
         phone: normalizedPhone,
         glpiId,
       };
+
+      // Si hay un LID explícito (tercer elemento), agregarlo también
+      if (value.length >= 3) {
+        const lid = String(value[2] ?? "").trim();
+        if (lid) {
+          normalized[lid] = {
+            name: nameText,
+            phone: normalizedPhone,
+            glpiId,
+          };
+        }
+      }
     }
     // Formato antiguo por compatibilidad (phone -> name/glpi_id)
     else {

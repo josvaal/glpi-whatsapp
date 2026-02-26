@@ -5,6 +5,7 @@ import { WhatsAppManager } from "./whatsapp-manager";
 import { WebServer } from "./web-server";
 import { TicketFlow } from "./ticket-flow";
 import { loadCategories } from "./categories";
+import { getDatabase } from "./database";
 
 // Tipo para el servidor web que acepta ambos clientes GLPI
 type GlpiClientForServer = GlpiWebClient | GlpiClient | null;
@@ -15,6 +16,11 @@ export async function run(): Promise<void> {
   console.log('🚀 Iniciando GLPI WhatsApp Bot...');
   console.log('   - Web Server:', config.webServer.enabled ? `Puerto ${config.webServer.port}` : 'Deshabilitado');
   console.log('   - GLPI Web API:', config.glpiWeb.useWebApi ? 'Habilitado (cookies)' : 'Deshabilitado (API REST)');
+
+  // Inicializar base de datos SQLite
+  const db = getDatabase();
+  const stats = db.getStats();
+  console.log(`📊 Base de datos: ${stats.totalTechnicians} técnicos, ${stats.totalTickets} tickets`);
 
   // Inicializar clientes GLPI
   let glpiRest: GlpiClient | null = null;

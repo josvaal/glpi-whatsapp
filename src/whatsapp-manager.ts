@@ -5,6 +5,8 @@ import makeWASocket, {
   type WASocket,
   type WAConnectionState,
   type WAMessage,
+  type Contact,
+  jidNormalizedUser,
 } from "@whiskeysockets/baileys";
 import pino from "pino";
 import qrcode from "qrcode-terminal";
@@ -45,9 +47,171 @@ export class WhatsAppManager {
   private selfId: string | null = null;
   private reconnectAttempts = 0;
   private readonly maxReconnectAttempts = 5;
+  private contactsStore = new Map<string, Contact>();
 
   constructor(config: WhatsappConfig) {
     this.config = config;
+  }
+
+  /**
+   * Extrae el número de teléfono de un JID de WhatsApp
+   * Ej: "51997314528@s.whatsapp.net" -> "51997314528"
+   */
+  private extractNumberFromJid(jid: string): string | null {
+    try {
+      const normalized = jidNormalizedUser(jid);
+      const atIndex = normalized.indexOf("@");
+      const userPart = atIndex > 0 ? normalized.slice(0, atIndex) : normalized;
+      const digits = userPart.replace(/\D+/g, "");
+      return digits.length >= 10 ? digits : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Lista todos los participantes del grupo con su información
+   */
+  private async listGroupParticipants(groupId: string): Promise<void> {
+    try {
+      // Esperar 5 segundos para dar tiempo a que lleguen los contacts.upsert
+      console.log('⏳ Esperando 5 segundos para cargar contactos...');
+      await new Promise(resolve => setTimeout(resolve, 5000));
+      
+      const groupMetadata = await this.socket?.groupMetadata(groupId);
+      if (!groupMetadata) {
+        console.log('⚠️ No se pudo obtener la metadata del grupo');
+        return;
+      }
+
+      const participants = groupMetadata.participants || [];
+      
+      // Obtener todos los contactos del store interno de Baileys
+      const baileysContacts = (this.socket as any)?.contactStore?.contacts || {};
+      
+      console.log('');
+      console.log('═'.repeat(150));
+      console.log(`👥 PARTICIPANTES DEL GRUPO "${groupMetadata.subject}"`);
+      console.log(`   Total: ${participants.length} participante(s)`);
+      console.log('═'.repeat(150));
+      console.log('PARTICIPANT.ID'.padEnd(30) + ' | ' + 'CONTACT STORE'.padEnd(10) + ' | ' + 'CONTACT.ID'.padEnd(30) + ' | ' + 'CONTACT.NOTIFY'.padEnd(20) + ' | ' + 'CONTACT.NAME'.padEnd(20) + ' | ' + 'PHONE EXTRACTED');
+      console.log('─'.repeat(150));
+
+      for (const participant of participants) {
+        const pId = participant.id;
+        
+        // Buscar en el contactStore de Baileys (probar con ambos formatos)
+        const baileysContact = baileysContacts[pId] || 
+                               baileysContacts[pId.replace('@lid', '@s.whatsapp.net')] || 
+                               baileysContacts[pId.replace('@lid', '@c.us')] ||
+                               null;
+        
+        // También buscar en nuestro contactsStore
+        const ourContact = this.contactsStore.get(pId);
+        
+        // Usar el contacto que tenga más información
+        const contact = baileysContact || ourContact;
+        
+        const inStore = contact ? '✅ SI' : '❌ NO';
+        const contactId = contact?.id || 'N/A';
+        const contactNotify = contact?.notify || 'N/A';
+        const contactName = contact?.name || 'N/A';
+        
+        // Extraer teléfono del ID
+        const phoneExtracted = pId.replace(/\D/g, '');
+        
+        console.log(
+          pId.padEnd(30) + ' | ' +
+          inStore.padEnd(10) + ' | ' +
+          contactId.padEnd(30) + ' | ' +
+          String(contactNotify).padEnd(20) + ' | ' +
+          String(contactName).padEnd(20) + ' | ' +
+          phoneExtracted
+        );
+      }
+
+      console.log('═'.repeat(150));
+      
+      // Mostrar resumen del contactStore
+      console.log('');
+      console.log('📊 RESUMEN DEL CONTACT STORE DE BAILEYS:');
+      console.log(`   Total contactos en store: ${Object.keys(baileysContacts).length}`);
+      console.log('');
+      
+      // Mostrar instrucciones
+      console.log('💡 INSTRUCCIONES:');
+      console.log('   Los LIDs son IDs temporales de WhatsApp por privacidad.');
+      console.log('   Para obtener los números reales (+51...):');
+      console.log('');
+      console.log('   OPCIÓN 1 - Que envíen mensajes:');
+      console.log('   1. Pide a cada técnico que envíe un mensaje al grupo');
+      console.log('   2. Revisa los logs del mensaje para ver el LID');
+      console.log('   3. Agrega el LID al numbers-map.json:');
+      console.log('      "NOMBRE": ["51997314528", "GLPI_ID", "LID_AQUI"]');
+      console.log('');
+      console.log('   OPCIÓN 2 - Forzar sincronización (puede fallar):');
+      console.log('   El bot intentará obtener los números automáticamente...');
+      console.log('');
+      
+      // Intentar sincronización USync
+      console.log('🔄 Intentando sincronización USync para obtener números...');
+      await this.syncParticipantsNumbers(participants);
+      
+      console.log('═'.repeat(150));
+      
+    } catch (err) {
+      console.log(`⚠️ Error al listar participantes: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  /**
+   * Intenta obtener los números reales de los participantes usando USync
+   */
+  private async syncParticipantsNumbers(participants: Array<{ id: string }>): Promise<void> {
+    if (!this.socket) {
+      console.log('   ❌ Socket no disponible');
+      return;
+    }
+
+    try {
+      // Extraer todos los LIDs
+      const lids = participants.map(p => p.id);
+      console.log(`   📋 Sincronizando ${lids.length} participantes...`);
+      
+      // Intentar USync
+      const result = await (this.socket as any).onUSync({
+        tag: 'usync',
+        attrs: {
+          sid: '0',
+          mode: 'query',
+          last: 'true',
+          index: '0',
+        },
+        content: [{
+          tag: 'query',
+          attrs: {},
+          content: [{
+            tag: 'contact',
+            attrs: {},
+            content: undefined,
+          }],
+        }, {
+          tag: 'list',
+          attrs: {},
+          content: lids.map(lid => ({
+            tag: 'user',
+            attrs: {
+              jid: lid,
+            },
+          })),
+        }],
+      });
+      
+      console.log('   📊 Resultado USync:', JSON.stringify(result, null, 2));
+    } catch (err) {
+      console.log(`   ⚠️ USync no disponible o falló: ${err instanceof Error ? err.message : String(err)}`);
+      console.log('   💡 Usa la OPCIÓN 1 (que envíen mensajes)');
+    }
   }
 
   setHandler(handler: WhatsAppEventHandler): void {
@@ -130,10 +294,16 @@ export class WhatsAppManager {
           this.notifyConnected();
           this.notifyStateChange();
 
+          // Los contactos se cargarán automáticamente vía contacts.upsert
+
           // Encontrar el grupo y configurar listener de mensajes
           this.activeGroupId = await this.findGroupByNameWithRetry(this.config.groupName);
           if (this.activeGroupId) {
             console.log(`👥 Grupo encontrado: ${this.config.groupName} (${this.activeGroupId})`);
+            
+            // Listar participantes del grupo
+            await this.listGroupParticipants(this.activeGroupId);
+            
             this.setupMessageListener();
           } else {
             console.error(`❌ No se encontró el grupo '${this.config.groupName}'`);
@@ -182,14 +352,27 @@ export class WhatsAppManager {
         }
       });
 
-      this.socket.ev.on("contacts.upsert", () => {
-        // Update user info if available
-        if (this.socket?.user) {
-          this.state.user = {
-            id: this.socket.user.id,
-            name: this.socket.user.name,
-          };
-          this.notifyStateChange();
+      this.socket.ev.on("contacts.upsert", (contacts: Contact[]) => {
+        console.log(`📇 [CONTACTS.UPSERT] ${contacts.length} contacto(s)`);
+        for (const contact of contacts) {
+          this.contactsStore.set(contact.id, contact);
+          console.log(`   └─ Guardado: id="${contact.id}", notify="${contact.notify}", name="${contact.name}"`);
+        }
+      });
+
+      this.socket.ev.on("contacts.update", (contacts: Partial<Contact>[]) => {
+        console.log(`📇 [CONTACTS.UPDATE] ${contacts.length} contacto(s)`);
+        for (const contact of contacts) {
+          if (contact.id) {
+            const existing = this.contactsStore.get(contact.id);
+            if (existing) {
+              this.contactsStore.set(contact.id, { ...existing, ...contact });
+              console.log(`   └─ Actualizado: id="${contact.id}"`);
+            } else {
+              this.contactsStore.set(contact.id, contact as Contact);
+              console.log(`   └─ Nuevo (update): id="${contact.id}"`);
+            }
+          }
         }
       });
     } catch (err) {
@@ -307,8 +490,65 @@ export class WhatsAppManager {
         }
 
         const senderId = msg.key.participant || msg.key.remoteJid || "";
-        const senderNumber = senderId.replace(/\D/g, "").split("@")[0];
+
+        // ========== EXTRACCIÓN DE NÚMERO DEL REMITENTE ==========
+        console.log(`📨 [MENSAJE] senderId="${senderId}", pushName="${msg.pushName}"`);
+        
+        let senderNumber: string | null = null;
+        const pushName = msg.pushName;
+
+        // PASO 1: Intentar con pushName
+        if (pushName) {
+          const normalizedPush = pushName.replace(/\D/g, "");
+          console.log(`   🔍 PASO 1 [pushName]: "${pushName}" -> "${normalizedPush}" (len=${normalizedPush.length})`);
+          if (normalizedPush.length >= 10 && normalizedPush.length <= 15) {
+            senderNumber = normalizedPush;
+            console.log(`   ✅ pushName VÁLIDO: ${senderNumber}`);
+          } else {
+            console.log(`   ❌ pushName INVÁLIDO (fuera de rango 10-15)`);
+          }
+        }
+
+        // PASO 2: Intentar con contactsStore
+        if (!senderNumber) {
+          console.log(`   🔍 PASO 2 [contactsStore]...`);
+          const contact = this.contactsStore.get(senderId);
+          if (contact) {
+            console.log(`   📇 Contacto ENCONTRADO: id="${contact.id}", notify="${contact.notify}"`);
+
+            if (!senderNumber && contact?.id) {
+              const idNumber = this.extractNumberFromJid(contact.id);
+              console.log(`      └─ id="${contact.id}" -> "${idNumber}"`);
+              if (idNumber && idNumber.length >= 10 && idNumber.length <= 15) {
+                senderNumber = idNumber;
+                console.log(`      ✅ USANDO id: ${senderNumber}`);
+              }
+            }
+
+            if (!senderNumber && contact?.notify) {
+              const normalizedNotify = contact.notify.replace(/\D/g, "");
+              console.log(`      └─ notify="${contact.notify}" -> "${normalizedNotify}"`);
+              if (normalizedNotify.length >= 10 && normalizedNotify.length <= 15) {
+                senderNumber = normalizedNotify;
+                console.log(`      ✅ USANDO notify: ${senderNumber}`);
+              }
+            }
+          } else {
+            console.log(`   ❌ Contacto NO encontrado en store`);
+          }
+        }
+
+        // PASO 3: Fallback - extraer del senderId original
+        if (!senderNumber) {
+          console.log(`   🔍 PASO 3 [fallback senderId]...`);
+          senderNumber = this.extractNumberFromJid(senderId);
+          console.log(`      └─ senderId="${senderId}" -> "${senderNumber}"`);
+        }
+
         const senderLabel = msg.pushName || senderNumber || "Desconocido";
+        console.log(`   📋 RESULTADO: senderNumber="${senderNumber}", senderLabel="${senderLabel}"`);
+        console.log(`   ${'='.repeat(50)}`);
+        
         const timestamp = new Date((Number(msg.messageTimestamp) || 0) * 1000);
 
         const incoming: IncomingMessage = {
