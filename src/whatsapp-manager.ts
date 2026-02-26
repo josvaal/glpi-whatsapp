@@ -559,46 +559,37 @@ export class WhatsAppManager {
           },
           reply: async (text: string) => {
             console.log(`   📤 [reply] INICIO - text="${text.substring(0, 50)}..."`);
-            console.log(`   📤 [reply] this.socket=${this.socket ? '✅ disponible' : '❌ null'}`);
-            console.log(`   📤 [reply] chatId="${chatId}"`);
-            console.log(`   📤 [reply] id="${id}"`);
             
             if (!this.socket) {
-              console.log(`   ❌ [reply] Socket es null, retornando`);
+              console.log(`   ❌ [reply] Socket es null`);
               return;
             }
             
-            console.log(`   📤 [reply] Agregando a ignoredMessageIds`);
             ignoredMessageIds.add(id);
             
             try {
-              console.log(`   📤 [reply] Llamando a sendMessage con timeout 5s...`);
+              // Intentar con quoted message (requerido en grupos)
+              console.log(`   📤 [reply] Enviando con quoted...`);
+              const sent = await this.socket.sendMessage(chatId, { 
+                text,
+                quoted: { key: { id, remoteJid: chatId, fromMe: false, participant: senderId } }
+              });
               
-              // Timeout para evitar que sendMessage se cuelgue infinitamente
-              const sendPromise = this.socket.sendMessage(chatId, { text });
-              const timeoutPromise = new Promise<never>((_, reject) => 
-                setTimeout(() => reject(new Error('Timeout de 5s')), 5000)
-              );
-              
-              const sent = await Promise.race([sendPromise, timeoutPromise]);
-              console.log(`   📤 [reply] sendMessage retornó:`, JSON.stringify(sent?.key || null));
-              
-              const sentId = sent?.key?.id;
-              console.log(`   📤 [reply] sentId="${sentId}"`);
-              
-              if (sentId) {
-                console.log(`   📤 [reply] Agregando sentId a ignoredMessageIds`);
-                ignoredMessageIds.add(sentId);
-                console.log(`   ✅ [reply] COMPLETADO EXITOSAMENTE`);
-              } else {
-                console.log(`   ⚠️ [reply] sentId es null/undefined`);
+              if (sent?.key?.id) {
+                ignoredMessageIds.add(sent.key.id);
+                console.log(`   ✅ [reply] ENVIADO CON ÉXITO`);
               }
             } catch (err) {
-              console.error(`   ❌ [reply] ERROR en sendMessage: ${err instanceof Error ? err.message : String(err)}`);
-              if (err instanceof Error && err.stack) {
-                console.error(`   ❌ [reply] Stack: ${err.stack}`);
+              console.log(`   ⚠️ [reply] Falló con quoted, intentando sin quoted...`);
+              try {
+                const sent = await this.socket.sendMessage(chatId, { text });
+                if (sent?.key?.id) {
+                  ignoredMessageIds.add(sent.key.id);
+                  console.log(`   ✅ [reply] ENVIADO SIN QUOTED`);
+                }
+              } catch (err2) {
+                console.error(`   ❌ [reply] ERROR: ${err2 instanceof Error ? err2.message : String(err2)}`);
               }
-              throw err;
             }
           },
           react: async (emoji: string) => {
