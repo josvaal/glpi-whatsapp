@@ -309,8 +309,8 @@ export class WebServer {
   }
 
   start(): void {
-    this.server.listen(this.port, () => {
-      console.log(`🌐 Dashboard web disponible en http://localhost:${this.port}`);
+    this.server.listen(this.port, '0.0.0.0', () => {
+      console.log(`🌐 Dashboard web disponible en http://0.0.0.0:${this.port}`);
       this.log(`Servidor web iniciado en puerto ${this.port}`);
     });
   }
