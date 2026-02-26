@@ -572,8 +572,15 @@ export class WhatsAppManager {
             ignoredMessageIds.add(id);
             
             try {
-              console.log(`   📤 [reply] Llamando a sendMessage...`);
-              const sent = await this.socket.sendMessage(chatId, { text });
+              console.log(`   📤 [reply] Llamando a sendMessage con timeout 5s...`);
+              
+              // Timeout para evitar que sendMessage se cuelgue infinitamente
+              const sendPromise = this.socket.sendMessage(chatId, { text });
+              const timeoutPromise = new Promise<never>((_, reject) => 
+                setTimeout(() => reject(new Error('Timeout de 5s')), 5000)
+              );
+              
+              const sent = await Promise.race([sendPromise, timeoutPromise]);
               console.log(`   📤 [reply] sendMessage retornó:`, JSON.stringify(sent?.key || null));
               
               const sentId = sent?.key?.id;
@@ -591,7 +598,7 @@ export class WhatsAppManager {
               if (err instanceof Error && err.stack) {
                 console.error(`   ❌ [reply] Stack: ${err.stack}`);
               }
-              throw err; // Re-lanzar para que handleRegister lo capture
+              throw err;
             }
           },
           react: async (emoji: string) => {
