@@ -577,57 +577,30 @@ export class WhatsAppManager {
             }
             
             ignoredMessageIds.add(id);
-            
-            // Timeout configurable - aumentar a 30 segundos para grupos
-            const SEND_TIMEOUT = 30000;
-            const MAX_RETRIES = 3;
-            const BASE_DELAY = 1000; // 1 segundo
-            
-            for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+
+            console.log(`   📤 [reply] Llamando a this.socket.sendMessage...`);
+            console.log(`   📤 [reply] chatId tipo: ${chatId.endsWith('@g.us') ? 'grupo' : 'chat'}`);
+
+            // Usar async/await directo para enviar el mensaje
+            // No await, fire and forget con manejo de errores
+            const socket = this.socket;
+            (async () => {
               try {
-                console.log(`   📤 [reply] Intento ${attempt}/${MAX_RETRIES}`);
-
-                // Crear timeout primero
-                let timeoutTriggered = false;
-                const timeoutPromise = new Promise<null>((_, reject) => {
-                  setTimeout(() => {
-                    console.log(`   📤 [reply] TIMEOUT disparado`);
-                    timeoutTriggered = true;
-                    reject(new Error(`Timeout de ${SEND_TIMEOUT/1000}s`));
-                  }, SEND_TIMEOUT);
-                });
-
-                // Crear sendPromise
-                console.log(`   📤 [reply] Llamando a this.socket.sendMessage...`);
-                const sendPromise = this.socket.sendMessage(chatId, { text });
-                console.log(`   📤 [reply] sendMessage llamado, esperando respuesta...`);
-
-                console.log(`   📤 [reply] Esperando Promise.race...`);
-                const sent = await Promise.race([sendPromise, timeoutPromise]);
-                console.log(`   📤 [reply] Promise.race resuelto`);
-
-                const sentId = sent?.key?.id;
+                console.log(`   📤 [reply] [async] Iniciando await de sendMessage...`);
+                const result = await socket.sendMessage(chatId, { text });
+                console.log(`   ✅ [reply] [async] Mensaje enviado! Resultado:`, result);
+                const sentId = result?.key?.id;
                 if (sentId) {
+                  console.log(`   ✅ [reply] [async] Mensaje ID: ${sentId}`);
                   ignoredMessageIds.add(sentId);
-                  console.log(`   ✅ [reply] MENSAJE ENVIADO - sentId="${sentId}"`);
-                  return;
-                } else {
-                  console.log(`   ⚠️ [reply] MENSAJE enviado pero sin ID`);
-                  return;
                 }
               } catch (err) {
-                const errorMsg = err instanceof Error ? err.message : String(err);
-                console.error(`   ❌ [reply] ERROR: ${errorMsg}`);
-
-                if (attempt < MAX_RETRIES) {
-                  const delay = BASE_DELAY * Math.pow(2, attempt - 1);
-                  console.log(`   ⏳ [reply] Reintentando en ${delay/1000}s...`);
-                  await new Promise(resolve => setTimeout(resolve, delay));
-                } else {
-                  throw err;
-                }
+                console.error(`   ❌ [reply] [async] Error:`, err instanceof Error ? err.message : String(err));
+                console.error(`   ❌ [reply] [async] Stack:`, err instanceof Error ? err.stack : 'N/A');
               }
-            }
+            })();
+
+            console.log(`   📤 [reply] Llamada sendMessage completada (fire & forget)`);
           },
           react: async (emoji: string) => {
             if (!this.socket) return;
