@@ -555,11 +555,31 @@ export class WhatsAppManager {
           mediaType,
           getMedia: async () => null, // Implementar si es necesario
           reply: async (text: string) => {
-            if (!this.socket) return;
-            ignoredMessageIds.add(id);
-            const sent = await this.socket.sendMessage(chatId, { text });
-            if (sent?.key?.id) {
-              ignoredMessageIds.add(sent.key.id);
+            if (!this.socket) {
+              console.log(`❌ [reply] Socket no disponible`);
+              return;
+            }
+            
+            // Reintentos automáticos (3 intentos)
+            for (let attempt = 0; attempt < 3; attempt++) {
+              try {
+                ignoredMessageIds.add(id);
+                const sent = await this.socket.sendMessage(chatId, { text });
+                if (sent?.key?.id) {
+                  ignoredMessageIds.add(sent.key.id);
+                  return; // Éxito
+                }
+              } catch (err) {
+                const errorMsg = err instanceof Error ? err.message : String(err);
+                console.log(`⚠️ [reply] Intento ${attempt + 1} fallido: ${errorMsg}`);
+                
+                if (attempt === 2) {
+                  console.error(`❌ [reply] Error después de 3 intentos: ${errorMsg}`);
+                } else {
+                  // Esperar antes del próximo intento (1s, 2s, 3s)
+                  await new Promise(resolve => setTimeout(resolve, 1000 * (attempt + 1)));
+                }
+              }
             }
           },
           react: async (emoji: string) => {
